@@ -1,0 +1,25 @@
+# Byte-compiled Python files
+*.py[cod]
+**/__pycache__/
+
+# Coverage
+htmlcov/
+.coverage
+
+# Logs
+**/log/
+
+# Editable installs & build artifacts
+*.egg-info/
+*.egg-link
+build/
+dist/
+
+# IDE/editor folders
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/

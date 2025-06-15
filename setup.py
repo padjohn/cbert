@@ -5,7 +5,7 @@ setup(
     version="0.1.0",
     description="CausalBERT tools: dataset prep, training & inference",
     author="Your Name",
-    url="https://github.com/yourusername/causalbert",
+    url="https://github.com/norygami/causalbert",
     packages=find_packages(exclude=["__pycache__", "log*", "tests*"]),
     install_requires=[
         "torch>=1.9.0",

@@ -7,6 +7,8 @@ CausalBERT is a specialized natural language processing model designed to extrac
 
 This repository contains the code for training, evaluating, and utilizing the CausalBERT model.
 
+![KBA](resources/KBA.png)
+
 ## Features
 
 * **Multi-Task Learning**: Jointly trains on token classification and relation classification tasks for improved performance.
@@ -22,7 +24,7 @@ This repository contains the code for training, evaluating, and utilizing the Ca
 To set up the environment, clone the repository and install the package using pip:
 
 ```bash
-git clone [https://github.com/your-username/CausalBERT.git](https://github.com/your-username/CausalBERT.git)
+git clone [https://github.com/norygami/CausalBERT.git](https://github.com/norygami/CausalBERT.git)
 cd CausalBERT
 pip install .
 ````
@@ -133,7 +135,7 @@ The `infer.py` script provides various functions to load your trained model and 
 ```python
 from causalbert.infer import load_model
 
-model_dir = "data/model/CausalBERT_EuroBERT" # Path to your saved model, assuming run from project root
+model_dir = "data/model/CausalEuroBERT" # Path to your saved model, assuming run from project root
 model, tokenizer, config, device = load_model(model_dir)
 
 print(f"Model loaded on {device}")
@@ -282,7 +284,7 @@ Contributions are welcome\! Please feel free to open issues or submit pull reque
 
 ## License
 
-This project is licensed under the Apache License 2.0. See the [LICENSE](https://www.google.com/search?q=LICENSE) file for more details.
+This project is licensed under the Apache License 2.0. See the [LICENSE](./LICENSE) file for more details.
 
 **Important Note on Base Models:**
 This project utilizes and fine-tunes pre-trained Transformer models from the Hugging Face Hub, specifically `EuroBERT/EuroBERT-2.1B`, which is also licensed under Apache License 2.0. While our code is permissively licensed, **the resulting fine-tuned model (weights and configurations) will inherit the license of the base model it was trained on.** Users are advised to check the specific license of any base model they choose to use with this code to ensure compliance with their intended use cases.

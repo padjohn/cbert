@@ -5,7 +5,7 @@ CausalBERT is a natural language processing framework designed to extract causal
 1.  **Token Classification (Span Recognition)**: Identifying and labeling causal indicators and entities within a sentence (e.g., "B-INDICATOR", "I-ENTITY").
 2.  **Relation Classification**: Determining the causal relationship (CAUSE, EFFECT, INTERDEPENDENCY, or NO_RELATION) between a given indicator and entity pair within a sentence.
 
-This repository contains the code to create datasets, train and run inference. A prototype [model]([here](https://huggingface.co/norygano/CBERT)) trained on German Environmental Texts aims to demonstrate the framework's capabilities.
+This repository contains the code to create datasets, train and run inference. A prototype [model](https://huggingface.co/norygano/CBERT) trained on German Environmental Texts aims to demonstrate the framework's capabilities.
 
 ![KBA](resources/KBA.png)
 

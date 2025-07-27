@@ -5,34 +5,41 @@ import logging
 import spacy
 from transformers import AutoTokenizer
 from datasets import Dataset
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
 def create_datasets(
     base_dir='../data/',
-    model_name="google-bert/bert-base-german-cased",
+    model_name="EuroBERT/EuroBERT-2.1B",
     include_empty=False,
     debug=False,
     dep=False
 ):
     def clean_sentence(text: str) -> str:
-        text = re.sub(r'\s+', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
         text = re.sub(r'\s([,.;:!?])', r'\1', text)
         return text.strip()
-
     if debug:
         logger.setLevel(logging.DEBUG)
     else:
         logger.setLevel(logging.INFO)
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name, add_prefix_space=True)
+    
+    tokenizer = AutoTokenizer.from_pretrained(model_name, add_prefix_space=True, trust_remote_code=True)
+    
+    if "<|parallel_sep|>" not in tokenizer.get_vocab():
+        tokenizer.add_special_tokens({"additional_special_tokens": ["<|parallel_sep|>"]})
 
     if dep:
-        nlp = spacy.load("de_core_news_trf")
+        try:
+            nlp = spacy.load("de_core_news_trf")
+        except OSError:
+            logger.error("SpaCy model 'de_core_news_trf' not found. Please run 'python -m spacy download de_core_news_trf'")
+            raise
 
     input_json = os.path.join(base_dir, 'output/inception/json', 'all_sentences.json')
-    output_dir_tokens = os.path.join(base_dir, f"dataset/{'base' if debug else 'dep'}/token")
-    output_dir_relations = os.path.join(base_dir, f"dataset/{'base' if debug else 'dep'}/relation")
+    output_dir_tokens = os.path.join(base_dir, f"dataset/{'dep' if dep else 'base'}/token")
+    output_dir_relations = os.path.join(base_dir, f"dataset/{'dep' if dep else 'base'}/relation")
 
     os.makedirs(output_dir_tokens, exist_ok=True)
     os.makedirs(output_dir_relations, exist_ok=True)
@@ -42,48 +49,15 @@ def create_datasets(
         "B-INDICATOR": 1,
         "I-INDICATOR": 2,
         "B-ENTITY": 3,
-        "I-ENTITY": 4
+        "I-ENTITY": 4,
     }
 
     relation_map = {
         "NO_RELATION": 0,
         "CAUSE": 1,
         "EFFECT": 2,
-        "INTERDEPENDENCY": 3
+        "INTERDEPENDENCY": 3,
     }
-
-    data_tokens = []
-    data_relations = []
-
-    def label_span(tokens, char_span, label_type, existing_labels, sentence_text):
-        first_token = True
-        found_token = False
-        for i, (start, end) in enumerate(tokens['offset_mapping']):
-            if start < char_span[1] and end > char_span[0]:
-                existing_labels[i] = f"B-{label_type}" if first_token else f"I-{label_type}"
-                first_token = False
-                found_token = True
-        if not found_token:
-            logger.warning(f"No tokens labeled for span {char_span} ({label_type}) in: {sentence_text}")
-        return existing_labels
-
-    def extract_entity_span(sentence, entity):
-        start_index = sentence.find(entity)
-        if start_index == -1:
-            logger.warning(f"Entity '{entity}' not found in: {sentence}")
-            return None
-        end_index = start_index + len(entity)
-        tokenized = tokenizer(sentence, return_offsets_mapping=True, add_special_tokens=True)
-        adjusted_start, adjusted_end = None, None
-        for start, end in tokenized['offset_mapping']:
-            if start == start_index:
-                adjusted_start = start
-            if end == end_index:
-                adjusted_end = end
-        if adjusted_start is not None and adjusted_end is not None:
-            return (adjusted_start, adjusted_end)
-        logger.warning(f"Span misalignment for '{entity}' in: {sentence}")
-        return (start_index, end_index)
 
     def normalize_relation_label(relation):
         label = relation.upper()
@@ -92,43 +66,109 @@ def create_datasets(
         logger.warning(f"Unknown relation '{relation}', defaulting to NO_RELATION")
         return "NO_RELATION"
 
-    with open(input_json, 'r', encoding='utf-8') as f:
-        sentences = json.load(f)
+    def get_char_spans_from_relations(relations_list, cleaned_sentence_text):
+        """Extracts all unique indicator and entity character spans from the relations list."""
+        char_spans = []
+        for rel in relations_list:
+            indicator_text_cleaned = clean_sentence(rel["indicator"])
+            char_start_ind = cleaned_sentence_text.find(indicator_text_cleaned)
+            if char_start_ind != -1:
+                char_end_ind = char_start_ind + len(indicator_text_cleaned)
+                char_spans.append((char_start_ind, char_end_ind, "INDICATOR"))
+            else:
+                logger.warning(f"Indicator '{indicator_text_cleaned}' not found in cleaned sentence for char span extraction: '{cleaned_sentence_text}'")
 
-    for entry in sentences:
-        sentence_text = clean_sentence(entry["sentence"])
+            for ent_data in rel["entities"]:
+                entity_text_cleaned = clean_sentence(ent_data["entity"])
+                char_start_ent = cleaned_sentence_text.find(entity_text_cleaned)
+                if char_start_ent != -1:
+                    char_end_ent = char_start_ent + len(entity_text_cleaned)
+                    char_spans.append((char_start_ent, char_end_ent, "ENTITY"))
+                else:
+                    logger.warning(f"Entity '{entity_text_cleaned}' not found in cleaned sentence for char span extraction: '{cleaned_sentence_text}'")
+        return char_spans
+
+    def label_tokens(tokenized_input, char_spans_with_type):
+        """
+        Labels tokens with BIO tags based on character spans using word_ids.
+        Args:
+            tokenized_input: The output from tokenizer(text, return_offsets_mapping=True)
+            char_spans_with_type: List of (char_start, char_end, type) tuples for spans (e.g., "ENTITY", "INDICATOR")
+        Returns:
+            A list of BIO labels for each token.
+        """
+        word_ids = tokenized_input.word_ids()
+        offset_mapping = tokenized_input.offset_mapping
+        
+        token_labels_str = ["O"] * len(word_ids)
+        char_spans_with_type.sort(key=lambda x: (x[0], x[1]))
+
+        for char_start, char_end, span_type in char_spans_with_type:
+            previous_word_idx = None
+            
+            for token_idx, word_idx in enumerate(word_ids):
+                if word_idx is None:
+                    continue
+
+                token_char_start, token_char_end = offset_mapping[token_idx]
+
+                token_text = tokenized_input.tokens()[token_idx]
+                if token_text.startswith('Ġ') and token_char_start < token_char_end:
+                    token_char_start += 1
+                overlap_start = max(char_start, token_char_start)
+                overlap_end = min(char_end, token_char_end)
+
+                if overlap_start < overlap_end:
+                    current_word_idx = word_ids[token_idx]
+
+                    if current_word_idx != previous_word_idx:
+                        token_labels_str[token_idx] = f"B-{span_type}"
+                    else:
+                        token_labels_str[token_idx] = f"I-{span_type}"
+                    previous_word_idx = current_word_idx
+        return token_labels_str
+
+    data_tokens = []
+    data_relations = []
+
+    with open(input_json, 'r', encoding='utf-8') as f:
+        sentences_data = json.load(f)
+
+    for entry in sentences_data:
+        original_sentence = entry["sentence"]
+        cleaned_sentence_text = clean_sentence(original_sentence)
+
         relations = entry.get("relations", [])
 
         if not relations and not include_empty:
             continue
 
-        tokens = tokenizer(sentence_text, return_offsets_mapping=True, add_special_tokens=True)
-        token_labels = ['O'] * len(tokens['input_ids'])
+        tokenized_output = tokenizer(
+            cleaned_sentence_text,
+            return_offsets_mapping=True,
+            add_special_tokens=True,
+            truncation=True,
+            max_length=512
+        )
+        input_ids = tokenized_output['input_ids']
 
+        all_char_spans = get_char_spans_from_relations(relations, cleaned_sentence_text)
+
+        current_token_labels_str = label_tokens(tokenized_output, all_char_spans)
         upos, feats, deps = [], [], []
         if dep:
-            doc = nlp(sentence_text)
+            doc = nlp(cleaned_sentence_text)
             for token in doc:
                 upos.append(token.pos_)
                 morph = token.morph.to_json()
                 feat_strings = [f"{k}={','.join(sorted(v))}" for k, v in morph.items()]
                 feats.append("|".join(sorted(feat_strings)) if feat_strings else "_")
                 deps.append(token.dep_)
-
-        for relation in relations:
-            indicator_span = extract_entity_span(sentence_text, relation["indicator"])
-            if indicator_span:
-                token_labels = label_span(tokens, indicator_span, "INDICATOR", token_labels, sentence_text)
-            for entity_data in relation["entities"]:
-                entity_text = entity_data["entity"]
-                entity_span = extract_entity_span(sentence_text, entity_text)
-                if entity_span:
-                    token_labels = label_span(tokens, entity_span, "ENTITY", token_labels, sentence_text)
-
+                
         token_entry = {
-            "sentence": sentence_text,
-            "input_ids": tokens["input_ids"],
-            "labels": [label_map[label] for label in token_labels]
+            "sentence": cleaned_sentence_text,
+            "input_ids": input_ids,
+            "labels": [label_map[label] for label in current_token_labels_str]
         }
         if dep:
             token_entry.update({
@@ -136,64 +176,80 @@ def create_datasets(
                 "feats": feats,
                 "dep": deps
             })
-
         data_tokens.append(token_entry)
         if debug and len(data_tokens) < 5:
             logger.debug(f"[Token] Sample #{len(data_tokens)}: {data_tokens[-1]}")
 
         for relation in relations:
-            indicator_text = relation["indicator"]
-            indicator_span = extract_entity_span(sentence_text, indicator_text)
-            if not indicator_span:
+            indicator_text_cleaned = clean_sentence(relation["indicator"])
+            if cleaned_sentence_text.find(indicator_text_cleaned) == -1:
+                logger.warning(f"Skipping relation. Indicator '{indicator_text_cleaned}' not found in cleaned sentence: '{original_sentence}' -> '{cleaned_sentence_text}'")
                 continue
+
             for entity_data in relation["entities"]:
-                entity_text = entity_data["entity"]
-                relation_type = normalize_relation_label(entity_data["relation"])
-                entity_span = extract_entity_span(sentence_text, entity_text)
-                if not entity_span:
+                entity_text_cleaned = clean_sentence(entity_data["entity"])
+                
+                if cleaned_sentence_text.find(entity_text_cleaned) == -1:
+                    logger.warning(f"Skipping relation. Entity '{entity_text_cleaned}' not found in cleaned sentence for indicator '{indicator_text_cleaned}': '{original_sentence}' -> '{cleaned_sentence_text}'")
                     continue
+
+                original_relation_type_str = entity_data["relation"].upper()
+                relation_type = normalize_relation_label(original_relation_type_str)
                 data_relations.append({
-                    "sentence": sentence_text,
-                    "indicator": indicator_text,
-                    "entity": entity_text,
+                    "sentence": cleaned_sentence_text,
+                    "indicator": indicator_text_cleaned,
+                    "entity": entity_text_cleaned,
                     "relation": relation_type
                 })
                 if debug and len(data_relations) < 5:
                     logger.debug(f"[Relation] Sample #{len(data_relations)}: {data_relations[-1]}")
 
     dataset_tokens = Dataset.from_list(data_tokens)
-    dataset_relations = Dataset.from_list(data_relations)
+    
+    if len(data_relations) > 0:
+        dataset_relations = Dataset.from_list(data_relations)
 
-    def tokenize_relations(examples):
-        tokenized = tokenizer(
-            examples["sentence"], truncation=True, padding="max_length", max_length=512, return_tensors="pt"
-        )
-        tokenized.update({
-            "indicator": examples["indicator"],
-            "entity": examples["entity"],
-            "relation": examples["relation"]
-        })
-        return tokenized
+        def tokenize_relations(examples):
+            sep_token_str = "<|parallel_sep|>"
+            combined_inputs = [
+                f"{ind} {sep_token_str} {ent} {sep_token_str} {sent}"
+                for ind, ent, sent in zip(examples["indicator"], examples["entity"], examples["sentence"])
+            ]
+            tokenized = tokenizer(
+                combined_inputs, truncation=True, padding="max_length", max_length=512, return_tensors="pt"
+            )
+            tokenized.update({
+                "indicator": examples["indicator"],
+                "entity": examples["entity"],
+                "relation": [relation_map[r] for r in examples["relation"]]
+            })
+            return tokenized
 
-    tokenized_relations = dataset_relations.map(tokenize_relations, batched=True)
+        tokenized_relations = dataset_relations.map(tokenize_relations, batched=True)
+        if len(tokenized_relations) > 1:
+            train_test_split_relations = tokenized_relations.train_test_split(test_size=0.2)
+            train_test_split_relations["train"].save_to_disk(os.path.join(output_dir_relations, "train"))
+            train_test_split_relations["test"].save_to_disk(os.path.join(output_dir_relations, "test"))
+        else:
+            logger.warning("Relation dataset has too few samples for train-test split. Saving all to train.")
+            tokenized_relations.save_to_disk(os.path.join(output_dir_relations, "train"))
+            Dataset.from_dict({"input_ids": [], "attention_mask": [], "indicator": [], "entity": [], "relation": []}).save_to_disk(os.path.join(output_dir_relations, "test"))
 
-    train_test_split_tokens = dataset_tokens.train_test_split(test_size=0.2)
-    train_test_split_relations = tokenized_relations.train_test_split(test_size=0.2)
+    else:
+        logger.warning("No relation examples to process. Skipping relation dataset creation.")
+        os.makedirs(os.path.join(output_dir_relations, "train"), exist_ok=True)
+        os.makedirs(os.path.join(output_dir_relations, "test"), exist_ok=True)
+        Dataset.from_dict({"input_ids": [], "attention_mask": [], "indicator": [], "entity": [], "relation": []}).save_to_disk(os.path.join(output_dir_relations, "train"))
+        Dataset.from_dict({"input_ids": [], "attention_mask": [], "indicator": [], "entity": [], "relation": []}).save_to_disk(os.path.join(output_dir_relations, "test"))
 
-    train_test_split_tokens["train"].save_to_disk(os.path.join(output_dir_tokens, "train"))
-    train_test_split_tokens["test"].save_to_disk(os.path.join(output_dir_tokens, "test"))
-    train_test_split_relations["train"].save_to_disk(os.path.join(output_dir_relations, "train"))
-    train_test_split_relations["test"].save_to_disk(os.path.join(output_dir_relations, "test"))
+    if len(dataset_tokens) > 1:
+        train_test_split_tokens = dataset_tokens.train_test_split(test_size=0.2)
+        train_test_split_tokens["train"].save_to_disk(os.path.join(output_dir_tokens, "train"))
+        train_test_split_tokens["test"].save_to_disk(os.path.join(output_dir_tokens, "test"))
+    else:
+        logger.warning("Token dataset has too few samples for train-test split. Saving all to train.")
+        dataset_tokens.save_to_disk(os.path.join(output_dir_tokens, "train"))
+        Dataset.from_dict({"sentence": [], "input_ids": [], "labels": []}).save_to_disk(os.path.join(output_dir_tokens, "test"))
+
 
     print("✅ Token and Relation Classification datasets created and saved.")
-
-if __name__ == "__main__":
-    log_dir = "logs"
-    os.makedirs(log_dir, exist_ok=True)
-    logging.basicConfig(
-        level=logging.DEBUG if __name__ == "__main__" else logging.INFO,
-        format="%(levelname)s: %(message)s",
-        filename="causalbert/log/dataset.txt",
-        filemode="w",
-    )
-    create_datasets(debug=True, dep=True)

@@ -1,6 +1,6 @@
 # CausalBERT: A Multi-Task Model for German Causal Relation Extraction
 
-CausalBERT is a natural language processing framework designed to extract causal relationships from German text. Built upon the Transformer architecture, this collection of scripts uses fine-tuned encoder-only models to perform two key tasks:
+CausalBERT is a natural language processing framework designed to extract **causal relationships** from German text. Built upon the `Transformer` architecture, this collection of scripts uses fine-tuned encoder-only models to perform two key tasks:
 
 1.  **Token Classification (Span Recognition)**: Identifying and labeling causal indicators and entities within a sentence (e.g., "B-INDICATOR", "I-ENTITY").
 2.  **Relation Classification**: Determining the causal relationship (CAUSE, EFFECT, INTERDEPENDENCY, or NO_RELATION) between a given indicator and entity pair within a sentence.

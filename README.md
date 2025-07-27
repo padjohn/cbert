@@ -5,7 +5,7 @@ CausalBERT is a natural language processing framework designed to extract causal
 1.  **Token Classification (Span Recognition)**: Identifying and labeling causal indicators and entities within a sentence (e.g., "B-INDICATOR", "I-ENTITY").
 2.  **Relation Classification**: Determining the causal relationship (CAUSE, EFFECT, INTERDEPENDENCY, or NO_RELATION) between a given indicator and entity pair within a sentence.
 
-This repository contains the code to create datasets, train and run inference. A prototype [model](https://huggingface.co/norygano/CBERT) trained on German Environmental Texts aims to demonstrate the framework's capabilities.
+This repository holds the code to create **datasets**, **train** and run **inference**. A prototype [model](https://huggingface.co/norygano/CBERT) based on German Environmental Texts aims to demonstrate the framework's capabilities.
 
 ![KBA](resources/KBA.png)
 
@@ -27,7 +27,7 @@ To set up the environment, clone the repository and install the package using pi
 git clone [https://github.com/norygami/CausalBERT.git](https://github.com/norygami/CausalBERT.git)
 cd CausalBERT
 pip install .
-````
+```
 
 This will install all necessary dependencies specified in `setup.py`.
 
@@ -86,11 +86,8 @@ Your raw data should be in a JSON file (e.g., `all_sentences.json`).
 Run `dataset.py` to process your raw data into token and relation classification datasets. You will need to provide the full path to your input JSON file.
 
 ```bash
-# Example if all_sentences.json is in a 'data/raw_input' folder within your project:
+# Example if all_sentences.json is in a 'data/raw_input' folder:
 python -m causalbert.dataset --input_json_path data/raw_input/all_sentences.json --base_dir ./data --model_name "EuroBERT/EuroBERT-2.1B" --debug # Add --dep for dependency parsing
-
-# If your all_sentences.json is directly in 'data/output/inception/json' as in your project structure:
-python -m causalbert.dataset --input_json_path data/output/inception/json/all_sentences.json --base_dir ./data --model_name "EuroBERT/EuroBERT-2.1B" --debug
 ```
 
 **Key Arguments for `dataset.py`:**

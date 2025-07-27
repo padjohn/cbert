@@ -10,6 +10,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 def create_datasets(
+    input_json_path: str,
     base_dir='../data/',
     model_name="EuroBERT/EuroBERT-2.1B",
     include_empty=False,
@@ -37,7 +38,8 @@ def create_datasets(
             logger.error("SpaCy model 'de_core_news_trf' not found. Please run 'python -m spacy download de_core_news_trf'")
             raise
 
-    input_json = os.path.join(base_dir, 'output/inception/json', 'all_sentences.json')
+    input_json = input_json_path
+
     output_dir_tokens = os.path.join(base_dir, f"dataset/{'dep' if dep else 'base'}/token")
     output_dir_relations = os.path.join(base_dir, f"dataset/{'dep' if dep else 'base'}/relation")
 

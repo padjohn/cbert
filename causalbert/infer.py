@@ -1,14 +1,30 @@
-# infer.py
 import torch
 import json
 import numpy as np
 import torch.nn.functional as F
 import os 
+import logging
 import safetensors.torch
-from causalbert.model import CausalBERTMultiTaskModel, CausalBERTMultiTaskConfig
+from causalbert.model import CausalBERTMultiTaskModel
 from transformers import AutoTokenizer, AutoModel, AutoConfig 
 
 def load_model(model_dir, device=None):
+    # ---------------------------------------------
+    # Logging-Konfiguration
+    log_dir = "log"
+    os.makedirs(log_dir, exist_ok=True)
+    log_file_path = os.path.join(log_dir, "infer.log")
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file_path, mode='w')
+        ],
+        force=True
+    )
+    # ---------------------------------------------
+
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     if device == "cuda" and torch.cuda.is_bf16_supported():
@@ -18,40 +34,64 @@ def load_model(model_dir, device=None):
     else:
         compute_dtype = torch.float32
 
-    config = CausalBERTMultiTaskConfig.from_pretrained(
-        model_dir,
-        trust_remote_code=True 
-    )
+    logging.info(f"Using device: {device} with compute dtype: {compute_dtype}")
+
+    try:
+        config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
+        logging.info("Configuration loaded successfully.")
+        logging.debug(f"Full loaded config dict: {config.to_dict()}")
+    except Exception as e:
+        logging.error(f"Error loading config from {model_dir}: {e}")
+        raise RuntimeError(f"Error loading config from {model_dir}: {e}")
+
+    # Check for the base_model_name.
+    if not hasattr(config, "base_model_name") or config.base_model_name is None:
+        logging.error(f"The 'base_model_name' key is missing or None in the config.json file located at {model_dir}.")
+        raise ValueError(
+            f"The 'base_model_name' key is missing or None in the config.json file located at {model_dir}. "
+            "Please ensure that your training script correctly saves this value."
+        )
+    
+    try:
+        model = CausalBERTMultiTaskModel(config)
+        logging.info("CausalBERTMultiTaskModel instantiated from config.")
+    except Exception as e:
+        logging.error(f"Error instantiating CausalBERTMultiTaskModel: {e}")
+        raise
+
     model = CausalBERTMultiTaskModel(config)
+    
     state_dict_path_safetensors = os.path.join(model_dir, "model.safetensors")
     state_dict_path_pytorch = os.path.join(model_dir, "pytorch_model.bin")
 
     loaded_state_dict = None
     if os.path.isfile(state_dict_path_safetensors):
-        print(f"Loading model weights from: {state_dict_path_safetensors}")
+        logging.info(f"Loading model weights from: {state_dict_path_safetensors}")
         loaded_state_dict = safetensors.torch.load_file(state_dict_path_safetensors, device="cpu") 
     elif os.path.isfile(state_dict_path_pytorch):
-        print(f"Loading model weights from: {state_dict_path_pytorch}")
+        logging.info(f"Loading model weights from: {state_dict_path_pytorch}")
         loaded_state_dict = torch.load(state_dict_path_pytorch, map_location="cpu")
     else:
+        logging.error(f"Missing model weights file (pytorch_model.bin or model.safetensors) in {model_dir}.")
         raise FileNotFoundError(f"Missing model weights file (pytorch_model.bin or model.safetensors) in {model_dir}. Please ensure your training saved this file.")
+    
     model.load_state_dict(loaded_state_dict)
 
-    # Load the tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         model_dir,
         local_files_only=True,
         trust_remote_code=True
     )
     tokenizer.model_max_length = 512
+    logging.info("Tokenizer loaded successfully.")
 
     model.eval() 
     model.to(device)
     if model.dtype != compute_dtype:
         model.to(compute_dtype)
+        logging.warning(f"Model dtype was not {compute_dtype}, converting now.")
 
-
-    print(f"Model loaded successfully to {device} with dtype {model.dtype}")
+    logging.info(f"Model loaded successfully to {device} with dtype {model.dtype}")
 
     return model, tokenizer, config, device
 

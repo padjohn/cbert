@@ -1,27 +1,36 @@
 import torch.nn as nn
 import torch
-from transformers import AutoModel, AutoConfig
+import logging
+from transformers import AutoModel
 from transformers.modeling_utils import PreTrainedModel
 from transformers.configuration_utils import PretrainedConfig
-from transformers import AutoTokenizer
 from torch.nn import CrossEntropyLoss
 
 class CausalBERTMultiTaskConfig(PretrainedConfig):
     model_type = "causalbert_multitask"
-    def __init__(self, span_labels=5, relation_labels=4, base_model_name=None, vocab_size_with_special_tokens=None, relation_class_weights=None, span_class_weights=None, **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.num_span_labels = span_labels
-        self.num_relation_labels = relation_labels
-        self.base_model_name = base_model_name
-        self.vocab_size_with_special_tokens = vocab_size_with_special_tokens
-        self.relation_class_weights = relation_class_weights
-        self.span_class_weights = span_class_weights
+        self.num_span_labels = kwargs.get("num_span_labels", 5)
+        self.num_relation_labels = kwargs.get("num_relation_labels", 4)
+        self.id2label_span = kwargs.get("id2label_span", {})
+        self.id2label_relation = kwargs.get("id2label_relation", {})
+        self.torch_dtype = kwargs.get("torch_dtype", "float32")
+        self.vocab_size = kwargs.get("vocab_size", 0)
+        self.relation_class_weights = kwargs.get("relation_class_weights", None)
+        self.span_class_weights = kwargs.get("span_class_weights", None)
+        self.base_model_name = kwargs.get("base_model_name", None)
 
 class CausalBERTMultiTaskModel(PreTrainedModel):
     config_class = CausalBERTMultiTaskConfig
 
     def __init__(self, config):
         super().__init__(config)
+
+        logging.info("Initializing CausalBERTMultiTaskModel with the following config:")
+        logging.info(f"  - Base Model Name: {config.base_model_name}")
+        logging.info(f"  - Vocab Size: {config.vocab_size}")
+        logging.info(f"  - Num Span Labels: {config.num_span_labels}")
+        logging.info(f"  - Num Relation Labels: {config.num_relation_labels}")
         
         torch_dtype_val = None
         if getattr(config, "torch_dtype", None) == "float16":
@@ -37,22 +46,24 @@ class CausalBERTMultiTaskModel(PreTrainedModel):
             torch_dtype=torch_dtype_val
         )
         
-        if config.vocab_size_with_special_tokens is not None and len(self.bert.get_input_embeddings().weight) != config.vocab_size_with_special_tokens:
-            self.bert.resize_token_embeddings(config.vocab_size_with_special_tokens)
-            print(f"Resized base BERT model's embeddings to {config.vocab_size_with_special_tokens}.")
+        if len(self.bert.get_input_embeddings().weight) != config.vocab_size:
+            self.bert.resize_token_embeddings(config.vocab_size)
+            logging.info(f"Resized base BERT model's embeddings to {config.vocab_size}.")
 
-        bert_model_type = getattr(self.bert.config, "model_type", "unknown")
-        hidden = config.hidden_size
+        hidden = self.bert.config.hidden_size
         self.token_classifier    = nn.Linear(hidden, config.num_span_labels)
         self.relation_classifier = nn.Linear(hidden, config.num_relation_labels)
         self.post_init()
+        logging.info("Model classifiers for token and relation tasks initialized.")
+
         self.relation_loss_weights = None
         if config.relation_class_weights is not None:
             self.relation_loss_weights = torch.tensor(config.relation_class_weights, dtype=torch.float32)
+            logging.info(f"Loaded relation loss weights: {self.relation_loss_weights}")
         self.token_loss_weights = None
         if config.span_class_weights is not None:
             self.token_loss_weights = torch.tensor(config.span_class_weights, dtype=torch.float32)
-
+            logging.info(f"Loaded token loss weights: {self.token_loss_weights}")
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -76,6 +87,7 @@ class CausalBERTMultiTaskModel(PreTrainedModel):
         elif task == "relation":
             logits = self.relation_classifier(out.last_hidden_state[:,0])
         else:
+            logging.error(f"Invalid task specified: {task}. Must be 'token' or 'relation'.")
             raise ValueError(f"Task must be 'token' or 'relation', but got {task}")
         
         loss = None
@@ -98,7 +110,7 @@ class CausalBERTMultiTaskModel(PreTrainedModel):
                 pass
 
         return {"loss": loss, "logits": logits}
-    
+
 AutoModel.register(CausalBERTMultiTaskConfig, CausalBERTMultiTaskModel)
 
 class MultiTaskCollator:
@@ -107,45 +119,57 @@ class MultiTaskCollator:
 
     def __call__(self, features):
         task = features[0]["task"]
+
         if task == "relation":
-            input_keys = ["input_ids", "attention_mask"]
-        else:
+            indicators = [f.get("indicator", "") for f in features]
+            entities = [f.get("entity", "") for f in features]
+            sentences = [f["sentence"] for f in features]
+            sep_token_str = "<|parallel_sep|>" 
+            
+            combined_inputs = [f"{i} {sep_token_str} {e} {sep_token_str} {s}" for i, e, s in zip(indicators, entities, sentences)]
+            
+            batch = self.tokenizer(
+                combined_inputs,
+                padding=True,
+                truncation=True,
+                max_length=self.tokenizer.model_max_length,
+                return_tensors="pt"
+            )
+            
+            labels_scalar = [f["relation"] for f in features]
+            batch["labels"] = torch.tensor(labels_scalar, dtype=torch.long)
+            batch["task"] = task
+
+        elif task == "token":
             input_keys = ["input_ids", "attention_mask", "token_type_ids"]
+            max_len = self.tokenizer.model_max_length
 
-        max_len = self.tokenizer.model_max_length
+            clean_inputs = []
+            for f in features:
+                ci = {}
+                for k in input_keys:
+                    if k not in f:
+                        continue
+                    v = f[k]
+                    if isinstance(v, list) and len(v) > max_len:
+                        v = v[:max_len]
+                    ci[k] = v
+                clean_inputs.append(ci)
 
-        clean_inputs = []
-        for f in features:
-            ci = {}
-            for k in input_keys:
-                if k not in f:
-                    continue
-                v = f[k]
-                if isinstance(v, list) and len(v) > max_len:
-                    v = v[:max_len]
-                ci[k] = v
-            clean_inputs.append(ci)
+            batch = self.tokenizer.pad(
+                clean_inputs,
+                padding=True,
+                return_tensors="pt"
+            )
+            seq_len = batch["input_ids"].size(1)
 
-        batch = self.tokenizer.pad(
-            clean_inputs,
-            padding=True,
-            return_tensors="pt"
-        )
-        seq_len = batch["input_ids"].size(1)
-
-        if task == "token":
             labels_seq = [f["labels_seq"] for f in features]
             padded_labels = [
                 l[:seq_len] + [-100] * max(0, seq_len - len(l))
                 for l in labels_seq
             ]
             batch["labels"] = torch.tensor(padded_labels, dtype=torch.long)
-            batch["task"]   = "token"
-
-        elif task == "relation":
-            labels_scalar = [int(f["labels_scalar"]) for f in features]
-            batch["labels"] = torch.tensor(labels_scalar, dtype=torch.long)
-            batch["task"]   = "relation"
+            batch["task"] = "token"
 
         else:
             raise ValueError("Task must be 'token' or 'relation'")

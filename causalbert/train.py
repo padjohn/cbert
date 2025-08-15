@@ -1,66 +1,117 @@
 import os
-import json
 import torch
 import wandb
+import logging
+import random
+import numpy as np
 from tqdm import tqdm
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
-from transformers import AutoConfig, AutoTokenizer, AutoModel, BitsAndBytesConfig
+from transformers import AutoConfig, AutoTokenizer, AutoModel
 from datasets.load import load_from_disk
-from causalbert.model import CausalBERTMultiTaskModel, CausalBERTMultiTaskConfig, MultiTaskCollator
+from causalbert.model import CausalBERTMultiTaskModel, MultiTaskCollator
 from collections import Counter
+
+
+class RelationTransform:
+    def __init__(self, tokenizer):
+        self.tokenizer = tokenizer
+
+    def __call__(self, examples):
+        # This function now expects a batch (a dictionary of lists)
+        tokenized_batches = []
+        for i in range(len(examples["sentence"])):
+            indicator = examples.get("indicator", [""])[i]
+            entity = examples.get("entity", [""])[i]
+            sentence = examples["sentence"][i]
+            sep_token_str = "<|parallel_sep|>" 
+            
+            combined_input = f"{indicator} {sep_token_str} {entity} {sep_token_str} {sentence}"
+            tokenized = self.tokenizer(combined_input, truncation=True, max_length=self.tokenizer.model_max_length)
+
+            tokenized.update({
+                "task": "relation",
+                "labels_scalar": int(examples["relation"][i]),
+                "labels_seq": [-100] * len(tokenized["input_ids"])
+            })
+            tokenized_batches.append(tokenized)
+
+        combined_batch = {key: [d[key] for d in tokenized_batches] for key in tokenized_batches[0]}
+        
+        return combined_batch
+
+def add_labels_seq(example):
+    return {
+        **example,
+        "task": ["token"] * len(example["input_ids"]),
+        "labels_seq": example.get("labels", [-100] * len(example["input_ids"]))
+    }
+
+def preprocess_relation(example, tokenizer):
+    indicator = example.get("indicator", "")
+    entity = example.get("entity", "")
+    sentence = example["sentence"]
+    sep_token_str = "<|parallel_sep|>" 
+    
+    combined_input = f"{indicator} {sep_token_str} {entity} {sep_token_str} {sentence}"
+    tokenized = tokenizer(combined_input, truncation=True, max_length=tokenizer.model_max_length)
+
+    tokenized.update({
+        "task": "relation",
+        "labels_scalar": int(example["relation"]),
+        "labels_seq": [-100] * len(tokenized["input_ids"])
+    })
+    return tokenized
 
 def train(
     base_dir='../data',
-    model_name="EuroBERT/EuroBERT-2.1B",
-    model_save_name="CausalBERT_EuroBERT",
-    epochs=5,
+    model_name="EuroBERT/EuroBERT-610m",
+    model_save_name="C-EBERT",
+    epochs=3,
     batch_size=8,
     lr=2e-5,
     device=None,
     use_wandb=True,
-    gradient_accumulation_steps=4
+    gradient_accumulation_steps=4,
+    seed=42
 ):
+    # ---------------------------------------------
+    log_dir = "log"
+    os.makedirs(log_dir, exist_ok=True)
+    log_file_path = os.path.join(log_dir, "train.log")
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler(log_file_path, mode='w'),
+        ],
+        force=True
+    )
+    # ---------------------------------------------
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    logging.info(f"Using device: {device}")
     model_save_path = os.path.join(base_dir, f"model/{model_save_name}")
 
     span_label_map = {"O": 0, "B-INDICATOR": 1, "I-INDICATOR": 2, "B-ENTITY": 3, "I-ENTITY": 4}
     relation_label_map = {"NO_RELATION": 0, "CAUSE": 1, "EFFECT": 2, "INTERDEPENDENCY": 3}
     id2span_label = {v: k for k, v in span_label_map.items()}
     id2relation_label = {v: k for k, v in relation_label_map.items()}
+    config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
 
     tokenizer = AutoTokenizer.from_pretrained(model_name, add_prefix_space=True, trust_remote_code=True)
     tokenizer.model_max_length = 512
-
+    
     if "<|parallel_sep|>" not in tokenizer.get_vocab():
         tokenizer.add_special_tokens({"additional_special_tokens": ["<|parallel_sep|>"]})
-        print("Added '<|parallel_sep|>' to tokenizer vocabulary in training script.")
+        logging.info("Added '<|parallel_sep|>' to tokenizer vocabulary.")
 
-    def add_labels_seq(example):
-        return {
-            **example,
-            "task": ["token"] * len(example["input_ids"]),
-            "labels_seq": example.get("labels", [-100] * len(example["input_ids"]))
-        }
-    
-    def preprocess_relation(example):
-        indicator = example.get("indicator", "")
-        entity = example.get("entity", "")
-        sentence = example["sentence"]
-        sep_token_str = "<|parallel_sep|>" 
-        
-        combined_input = f"{indicator} {sep_token_str} {entity} {sep_token_str} {sentence}"
-        tokenized = tokenizer(combined_input, truncation=True, max_length=tokenizer.model_max_length)
-
-        tokenized.update({
-            "task": "relation",
-            "labels_scalar": int(example["relation"]),
-            "labels_seq": [-100] * len(tokenized["input_ids"])
-        })
-        return tokenized
-
-    # Load token classification dataset
     span_train_path = os.path.join(base_dir, 'dataset/base/token/train')
     span_train = None
     span_class_weights_list = None
@@ -96,11 +147,12 @@ def train(
             else:
                 span_class_weights_list = [1.0] * num_span_classes
 
-            print(f"Calculated token (span) class weights (normalized): {span_class_weights_list}")
+            logging.info(f"Calculated token (span) class weights (normalized): {span_class_weights_list}")
         else:
-            print(f"Warning: Token dataset found at {span_train_path} but it is empty. Skipping token training.")
+            logging.warning(f"Token dataset found at {span_train_path} but it is empty. Skipping token training.")
     else:
-        print(f"Warning: No token dataset found at {span_train_path}. Skipping token training.")
+        logging.warning(f"No token dataset found at {span_train_path}. Skipping token training.")
+
 
     rel_train_path = os.path.join(base_dir, 'dataset/base/relation/train')
     rel_train = None
@@ -108,17 +160,22 @@ def train(
 
     if os.path.exists(rel_train_path):
         loaded_rel_dataset = load_from_disk(rel_train_path)
-        if len(loaded_rel_dataset) > 0:
-            rel_train = loaded_rel_dataset.map(preprocess_relation)
+        if isinstance(loaded_rel_dataset, dict):
+            rel_train = loaded_rel_dataset['train']
+        else:
+            rel_train = loaded_rel_dataset
 
-            print("\nDEBUG (After preprocess_relation for rel_train):")
-            debug_relation_labels = [example["labels_scalar"] for example in rel_train]
+        if len(rel_train) > 0:
+            rel_train = rel_train.add_column("task", ["relation"] * len(rel_train))
+
+            logging.info("After preprocess_relation for rel_train:")
+            debug_relation_labels = [example["relation"] for example in rel_train]
             debug_relation_counts = Counter(debug_relation_labels)
-            print(f"  Counts of labels_scalar: {debug_relation_counts}")
-            print(f"  First 10 labels_scalar: {debug_relation_labels[:10]}")
-            print(f"  Last 10 labels_scalar: {debug_relation_labels[-10:]}")
+            logging.info(f"  Counts of labels: {debug_relation_counts}")
+            logging.info(f"  First 10 labels: {debug_relation_labels[:10]}")
+            logging.info(f"  Last 10 labels: {debug_relation_labels[-10:]}")
 
-            relation_labels_for_weights = [example["labels_scalar"] for example in rel_train]
+            relation_labels_for_weights = [example["relation"] for example in rel_train]
             class_counts = Counter(relation_labels_for_weights)
 
             num_relation_classes = len(relation_label_map)
@@ -137,12 +194,33 @@ def train(
             else:
                 relation_class_weights_list = [1.0] * num_relation_classes
 
-            print(f"Calculated relation class weights (normalized): {relation_class_weights_list}")
-
+            logging.info(f"Calculated relation class weights (normalized): {relation_class_weights_list}")
         else:
-            print(f"Warning: Relation dataset found at {rel_train_path} but it is empty. Skipping relation training.")
+            logging.warning(f"Relation dataset found at {rel_train_path} but it is empty. Skipping relation training.")
     else:
-        print(f"Warning: No relation dataset found at {rel_train_path}. Skipping relation training.")
+        logging.warning(f"No relation dataset found at {rel_train_path}. Skipping relation training.")
+
+
+    if span_train:
+        num_examples_to_log = min(5, len(span_train)) # Log up to 5 examples
+        logging.info("--- Sample of Token Classification Data with Labels ---")
+        
+        for i in range(num_examples_to_log):
+            example = span_train[i]
+            input_ids = example['input_ids']
+            labels_seq = example['labels_seq']
+
+            tokens = tokenizer.convert_ids_to_tokens(input_ids)
+            labels = [id2span_label[l] if l != -100 else 'IGNORE' for l in labels_seq]
+            
+            # Format the output for readability
+            token_label_pairs = list(zip(tokens, labels))
+            formatted_pairs = "\n".join([f"    - {token:<20} {label}" for token, label in token_label_pairs])
+
+            logging.info(f"Example {i+1}:")
+            logging.info(f"Tokens and Labels:\n{formatted_pairs}")
+        
+        logging.info("---------------------------------------------------")
 
     collator = MultiTaskCollator(tokenizer)
 
@@ -155,36 +233,40 @@ def train(
 
 
     compute_dtype = torch.bfloat16 if device == "cuda" and torch.cuda.is_bf16_supported() else torch.float16 if device == "cuda" else torch.float32
+    base_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
 
-    base_cfg = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
-    base_config_dict = base_cfg.to_dict()
-    base_config_dict.pop('torch_dtype', None)
-    base_config_dict.pop('architectures', None)
+    logging.info("--- STARTING CONFIGURATION PROCESS ---")
+    config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    logging.info(f"Base model config loaded. Key attributes: hidden_size={config.hidden_size}, vocab_size={config.vocab_size}, model_type={config.model_type}")
+    logging.debug(f"Full base config dict: {config.to_dict()}")
     
-    config = CausalBERTMultiTaskConfig(
-        base_model_name=model_name,
-        num_span_labels=len(span_label_map),
-        num_relation_labels=len(relation_label_map),
-        id2label_span={str(k): v for k, v in id2span_label.items()},
-        id2label_relation={str(k): v for k, v in id2relation_label.items()},
-        architectures=["CausalBERTMultiTaskModel"],
-        torch_dtype=str(compute_dtype).replace("torch.", ""),
-        vocab_size_with_special_tokens=len(tokenizer),
-        relation_class_weights=None,
-        span_class_weights=span_class_weights_list,
-        **base_config_dict 
-    )
+    # Multitask-specific configurations
+    config.num_span_labels = len(span_label_map)
+    config.num_relation_labels = len(relation_label_map)
+    config.id2label_span = {str(k): v for k, v in id2span_label.items()}
+    config.id2label_relation = {str(k): v for k, v in id2relation_label.items()}
+    config.architectures = ["CausalBERTMultiTaskModel"]
+    config.torch_dtype = str(compute_dtype).replace("torch.", "")
+    config.vocab_size = len(tokenizer)
+    config.relation_class_weights = relation_class_weights_list
+    config.span_class_weights = span_class_weights_list
     config.model_type = "causalbert_multitask"
+    config.base_model_name = model_name
     
     model = CausalBERTMultiTaskModel(config)
     
     model.to(device)
+
+    logging.info(f"Custom attributes added. New key attributes: num_span_labels={config.num_span_labels}, vocab_size (after resize)={config.vocab_size}, base_model_name={config.base_model_name}")
+    logging.debug(f"Full final config dict: {config.to_dict()}")
+    logging.info("--- CONFIGURATION PROCESS COMPLETE ---")
+
     
-    print(f"Moved model to {device}")
+    logging.info(f"Moved model to {device}")
     if hasattr(model, 'bert') and hasattr(model.bert.config, '_attn_implementation'):
-        print(f"Base model Attention Implementation: {model.bert.config._attn_implementation}")
+        logging.info(f"Base model Attention Implementation: {model.bert.config._attn_implementation}")
     else:
-        print("Base model Attention Implementation not explicitly set or found on model.bert.config.")
+        logging.info("Base model Attention Implementation not explicitly set or found on model.bert.config.")
 
     if use_wandb:
         wandb.init(project="CausalBERT", entity="norygano", config={
@@ -209,7 +291,9 @@ def train(
     global_step = 0
     for epoch in range(epochs):
         model.train()
-        print(f"Epoch {epoch+1}/{epochs}")
+        log_str = f"Epoch {epoch+1}/{epochs}"
+        print(log_str)
+        logging.info(log_str)
         
         for loader in all_loaders:
             task_type = loader.dataset[0]["task"]
@@ -224,7 +308,6 @@ def train(
                 batch = {k: v.to(device) for k, v in batch.items()}
 
                 if task_type == "token":
-                    # Filter out -100 (ignore_index) before counting
                     valid_labels = labels[labels != -100].tolist()
                     epoch_token_label_counts.update(valid_labels)
                 
@@ -250,10 +333,13 @@ def train(
                 loop.set_postfix(loss=loss.item() * gradient_accumulation_steps)
                 if use_wandb:
                     wandb.log({f"{task_type}_loss": loss.item() * gradient_accumulation_steps, "epoch": epoch + 1, "global_step": global_step})
+                logging.info({f"{task_type}_loss": loss.item() * gradient_accumulation_steps, "epoch": epoch + 1, "global_step": global_step})
             if task_type == "token":
-                print(f"\nDEBUG (Epoch {epoch+1} Token Label Distribution): {epoch_token_label_counts}")
+               logging.info(f"\n(Epoch {epoch+1} Token Label Distribution): {epoch_token_label_counts}")
 
-        print(f"Finished Epoch {epoch+1}")
+        log_str = f"Finished Epoch {epoch+1}"
+        print(log_str)
+        logging.info(log_str)
 
     if use_wandb:
         wandb.finish()
@@ -262,7 +348,7 @@ def train(
     model.save_pretrained(model_save_path)
     tokenizer.save_pretrained(model_save_path)
 
-    print(f"Model saved to {model_save_path}")
+    logging.info(f"Model saved to {model_save_path}")
 
 if __name__ == "__main__":
     train()

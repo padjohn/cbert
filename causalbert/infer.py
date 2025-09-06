@@ -7,10 +7,10 @@ import logging
 import safetensors.torch
 from causalbert.model import CausalBERTMultiTaskModel
 from transformers import AutoTokenizer, AutoModel, AutoConfig 
+import string
 
 def load_model(model_dir, device=None):
-    # ---------------------------------------------
-    # Logging-Konfiguration
+    # LOGGING -------------------------------
     log_dir = "log"
     os.makedirs(log_dir, exist_ok=True)
     log_file_path = os.path.join(log_dir, "infer.log")
@@ -38,17 +38,16 @@ def load_model(model_dir, device=None):
 
     try:
         config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
-        logging.info("Configuration loaded successfully.")
+        logging.info("Configuration loaded.")
         logging.debug(f"Full loaded config dict: {config.to_dict()}")
     except Exception as e:
         logging.error(f"Error loading config from {model_dir}: {e}")
         raise RuntimeError(f"Error loading config from {model_dir}: {e}")
 
-    # Check for the base_model_name.
     if not hasattr(config, "base_model_name") or config.base_model_name is None:
-        logging.error(f"The 'base_model_name' key is missing or None in the config.json file located at {model_dir}.")
+        logging.error(f"'base_model_name' key is missing or None in the config.json file located at {model_dir}.")
         raise ValueError(
-            f"The 'base_model_name' key is missing or None in the config.json file located at {model_dir}. "
+            f"'base_model_name' key is missing or None in the config.json file located at {model_dir}. "
             "Please ensure that your training script correctly saves this value."
         )
     
@@ -95,85 +94,10 @@ def load_model(model_dir, device=None):
 
     return model, tokenizer, config, device
 
-def predict_token_labels(model, tokenizer, config, sentence, device="cuda"):
-    tokens = tokenizer(sentence.strip(), return_tensors="pt", truncation=True, max_length=tokenizer.model_max_length).to(device)
-    with torch.no_grad():
-        out = model(**tokens, task="token")
-    preds = out["logits"].argmax(-1).squeeze().tolist()
-    input_ids = tokens["input_ids"].squeeze()
-    tokens_decoded = tokenizer.convert_ids_to_tokens(input_ids)
-    labels = [config.id2label_span.get(str(p), "O") for p in preds]
-    return list(zip(tokens_decoded, labels))
-
-def predict_relation_label(model, tokenizer, config, sentence, indicator, entity, device="cuda"):
-    sep_token_str = "<|parallel_sep|>" 
-    input_text = f"{indicator.strip()} {sep_token_str} {entity.strip()} {sep_token_str} {sentence.strip()}"
-    tokens = tokenizer(input_text, return_tensors="pt", truncation=True, padding=True, max_length=tokenizer.model_max_length).to(device)
-    with torch.no_grad():
-        out = model(**tokens, task="relation")
-    pred = out["logits"].argmax(-1).item()
-    return config.id2label_relation.get(str(pred), "None")
-
-def predict_relations_batch(model, tokenizer, config, test_cases, device="cuda"):
+def _get_token_predictions_with_confidence(model, tokenizer, config, sentence, device):
     """
-    test_cases: list of (indicator, entity, sentence)
-    returns: list of relation labels
+    Performs token classification and returns tokens, labels, and confidences.
     """
-    sep_token_str = "<|parallel_sep|>" 
-    inputs = [
-        f"{indicator} {sep_token_str} {entity} {sep_token_str} {sentence}"
-        for (indicator, entity, sentence) in test_cases
-    ]
-    encodings = tokenizer(inputs, return_tensors="pt", padding=True, truncation=True, max_length=tokenizer.model_max_length).to(device)
-
-    with torch.no_grad():
-        out = model(**encodings, task="relation")
-
-    preds = out["logits"].argmax(-1).cpu().tolist()
-    return [config.id2label_relation[str(p)] for p in preds]
-
-def analyze_sentence(model, tokenizer, config, sentence, indicators_entities=[], device="cuda"):
-    """
-    - Runs token classification
-    - Runs relation classification for given (indicator, entity) pairs
-    """
-    result = {}
-
-    # Token classification
-    token_preds = predict_token_labels(model, tokenizer, config, sentence, device)
-    result["tokens"] = token_preds
-
-    # Relation classification
-    if indicators_entities:
-        test_cases = [(i, e, sentence) for i, e in indicators_entities]
-        relation_preds = predict_relations_batch(model, tokenizer, config, test_cases, device)
-        result["relations"] = list(zip(indicators_entities, relation_preds))
-    else:
-        result["relations"] = []
-
-    return result
-
-def classify_relation(model, tokenizer, config, sentence, indicator, entity):
-    model.eval()
-    sep_token_str = "<|parallel_sep|>"
-    input_text = f"{indicator} {sep_token_str} {entity} {sep_token_str} {sentence}"
-    inputs = tokenizer(input_text, return_tensors="pt", truncation=True, max_length=tokenizer.model_max_length).to(model.device)
-
-    with torch.no_grad():
-        output = model(**inputs, task="relation")
-        logits = output["logits"].squeeze()
-        probs = F.softmax(logits, dim=-1)
-        pred_id = torch.argmax(probs).item()
-
-    return {
-        "label": config.id2label_relation[str(pred_id)],
-        "confidence": probs[pred_id].item()
-    }
-
-def analyze_sentence_with_confidence(model, tokenizer, config, sentence, indicator_entity_pairs, device="cuda"):
-    result = {"tokens": [], "relations": []}
-
-    # Token classification
     inputs = tokenizer(sentence, return_tensors="pt", truncation=True, max_length=tokenizer.model_max_length).to(device)
     with torch.no_grad():
         out = model(**inputs, task="token")
@@ -185,9 +109,13 @@ def analyze_sentence_with_confidence(model, tokenizer, config, sentence, indicat
     tokens_decoded = tokenizer.convert_ids_to_tokens(inputs["input_ids"].squeeze())
     labels = [config.id2label_span[str(p.item())] for p in preds]
     confidences = [round(c.item(), 4) for c in confs]
-    result["tokens"] = list(zip(tokens_decoded, labels, confidences))
+    return list(zip(tokens_decoded, labels, confidences))
 
-    # Relation classification
+def _get_relation_predictions_with_confidence(model, tokenizer, config, sentence, indicator_entity_pairs, device):
+    """
+    Classifies relations for a given list of indicator-entity pairs.
+    """
+    relation_results = []
     sep_token_str = "<|parallel_sep|>"
     for indicator, entity in indicator_entity_pairs:
         input_text = f"{indicator} {sep_token_str} {entity} {sep_token_str} {sentence}"
@@ -199,12 +127,46 @@ def analyze_sentence_with_confidence(model, tokenizer, config, sentence, indicat
         pred = logits.argmax(-1).item()
         confidence = round(probs[0][pred].item(), 4)
         label = config.id2label_relation[str(pred)]
-        result["relations"].append(((indicator, entity), {"label": label, "confidence": confidence}))
+        relation_results.append(((indicator, entity), {"label": label, "confidence": confidence}))
+    return relation_results
 
+def analyze_sentence_with_confidence(model, tokenizer, config, sentence, indicator_entity_pairs, device="cuda"):
+    """
+    Analyzes a sentence for token classification and specified relation pairs.
+    """
+    result = {"tokens": [], "relations": []}
+    result["tokens"] = _get_token_predictions_with_confidence(model, tokenizer, config, sentence, device)
+    if indicator_entity_pairs:
+        result["relations"] = _get_relation_predictions_with_confidence(model, tokenizer, config, sentence, indicator_entity_pairs, device)
     return result
 
-# Merge BIO tags into entity spans (Revised and placed in infer.py)
 def merge_bio_entities(tokens, labels, confidences):
+    """
+    Merges tokens with BIO (Begin, Inside, Outside) tags into a single, cohesive entity.
+
+    The function iterates through a list of tokens, labels, and confidences,
+    and groups adjacent tokens that form a single named entity (e.g., "B-PERSON",
+    "I-PERSON"). The confidence for the merged entity is the average of the
+    confidences of its constituent tokens.
+
+    Args:
+        tokens (list): A list of token strings from the tokenizer.
+        labels (list): A list of BIO labels corresponding to each token.
+        confidences (list): A list of confidence scores for each token's label.
+
+    Returns:
+        list: A list of tuples, where each tuple represents a merged entity
+              or a single token that is not part of a multi-token entity.
+              Each tuple contains the merged token string, the label, and
+              the average confidence score.
+
+    Example:
+        >>> tokens = ['[CLS]', 'The', 'ĠUnited', 'ĠStates', 'of', 'ĠAmerica', '[SEP]']
+        >>> labels = ['O', 'B-COUNTRY', 'I-COUNTRY', 'I-COUNTRY', 'I-COUNTRY', 'I-COUNTRY', 'O']
+        >>> confidences = [0.9, 0.95, 0.92, 0.91, 0.93, 0.90, 0.99]
+        >>> merge_bio_entities(tokens, labels, confidences)
+        [('The United States of America', 'COUNTRY', 0.922)]
+    """
     merged = []
     current_tokens = []
     current_label = None
@@ -252,7 +214,7 @@ def analyze_token_trajectories(model, tokenizer, sentence, target_tokens=None, o
     with torch.no_grad():
         outputs = model.bert(**inputs, output_hidden_states=True, return_dict=True)
 
-    hidden_states = outputs.hidden_states
+    hidden_states = outputs.hidden_hidden_states
     layer_embeddings = torch.stack(hidden_states)
     layer_embeddings = layer_embeddings.squeeze(1)
 
@@ -274,8 +236,55 @@ def analyze_token_trajectories(model, tokenizer, sentence, target_tokens=None, o
                 "embedding": vec.tolist()
             })
 
-    # Save JSON
     with open(output_json, "w") as f:
         json.dump(data, f, indent=2)
 
     return data
+
+def clean_tok(tok: str) -> str:
+    """Clean Special Tokens and Umlauts."""
+    tok = tok.lstrip("Ġ ")
+    try:
+        tok = tok.encode("latin-1").decode("utf-8")
+    except UnicodeError:
+        pass
+    return tok
+
+
+def sentence_analysis(model, tokenizer, config, sentence, device="cuda"):
+    """
+    Performs a complete analysis of a sentence, including token and relation classification.
+    """
+    # 1. Token predictions
+    classified_tokens = _get_token_predictions_with_confidence(model, tokenizer, config, sentence, device)
+
+    # 2. Merge BIO spans
+    tokens = [t for (t, _, _) in classified_tokens]
+    labels = [l for (_, l, _) in classified_tokens]
+    confs = [c for (_, _, c) in classified_tokens]
+    merged_spans = merge_bio_entities(tokens, labels, confs)
+
+    # 3. Derive indicators and entities
+    indicators = []
+    entities = []
+    
+    for token, label, _ in merged_spans:
+        if all(c in string.punctuation for c in token) or token in tokenizer.all_special_tokens:
+            continue
+        cleaned_token = token.lstrip('Ġ').strip(string.punctuation)
+        
+        if label == "INDICATOR":
+            indicators.append(cleaned_token)
+        elif label == "ENTITY":
+            entities.append(cleaned_token)
+            
+    # 4. Classify relations
+    derived_pairs = [(i, e) for i in indicators for e in entities if i != e]
+    relation_results = analyze_sentence_with_confidence(model, tokenizer, config, sentence, derived_pairs, device)
+
+    return {
+        "sentence": sentence,
+        "token_predictions": classified_tokens,
+        "merged_spans": merged_spans,
+        "derived_relations": relation_results["relations"] 
+    }

@@ -96,7 +96,7 @@ def create_datasets(
     include_empty=False,
     debug=False,
     dep=False,
-    augment=False,
+    augment=0,
     entities_yml_path='yml/entities.yml',
 ):
     def clean_sentence(text: str) -> str:
@@ -214,16 +214,18 @@ def create_datasets(
     with open(input_json, 'r', encoding='utf-8') as f:
         sentences_data = json.load(f)
 
-    if augment:
+    if augment > 0:
         logger.info("Starting data augmentation...")
-        # Load entities from YAML file
         entity_replacements = _load_replacement_entities(entities_yml_path)
         if not entity_replacements:
             logger.error("No entities loaded from YAML. Skipping augmentation.")
         else:
             logger.info(f"Loaded {len(entity_replacements)} entities from {entities_yml_path}")
-
-        sentences_data = _augment_data(sentences_data, entity_replacements)
+            augmented_data = _augment_data(sentences_data, entity_replacements)
+            if augment == 1:
+                sentences_data = augmented_data[len(sentences_data):]
+            elif augment == 2:
+                sentences_data = augmented_data
         logger.info(f"Data augmentation complete. Total samples: {len(sentences_data)}")
     
     for entry in sentences_data:

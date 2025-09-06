@@ -6,7 +6,7 @@ import os
 import logging
 import safetensors.torch
 from causalbert.model import CausalBERTMultiTaskModel
-from transformers import AutoTokenizer, AutoModel, AutoConfig 
+from transformers import AutoTokenizer, AutoConfig 
 import string
 
 def load_model(model_dir, device=None):
@@ -60,16 +60,16 @@ def load_model(model_dir, device=None):
 
     model = CausalBERTMultiTaskModel(config)
     
-    state_dict_path_safetensors = os.path.join(model_dir, "model.safetensors")
-    state_dict_path_pytorch = os.path.join(model_dir, "pytorch_model.bin")
+    safetensors_path = os.path.join(model_dir, "model.safetensors")
+    pytorch_path = os.path.join(model_dir, "pytorch_model.bin")
 
     loaded_state_dict = None
-    if os.path.isfile(state_dict_path_safetensors):
-        logging.info(f"Loading model weights from: {state_dict_path_safetensors}")
-        loaded_state_dict = safetensors.torch.load_file(state_dict_path_safetensors, device="cpu") 
-    elif os.path.isfile(state_dict_path_pytorch):
-        logging.info(f"Loading model weights from: {state_dict_path_pytorch}")
-        loaded_state_dict = torch.load(state_dict_path_pytorch, map_location="cpu")
+    if os.path.isfile(safetensors_path):
+        logging.info(f"Loading model weights from: {safetensors_path}")
+        loaded_state_dict = safetensors.torch.load_file(safetensors_path, device="cpu") 
+    elif os.path.isfile(pytorch_path):
+        logging.info(f"Loading model weights from: {pytorch_path}")
+        loaded_state_dict = torch.load(pytorch_path, map_location="cpu")
     else:
         logging.error(f"Missing model weights file (pytorch_model.bin or model.safetensors) in {model_dir}.")
         raise FileNotFoundError(f"Missing model weights file (pytorch_model.bin or model.safetensors) in {model_dir}. Please ensure your training saved this file.")
@@ -94,7 +94,7 @@ def load_model(model_dir, device=None):
 
     return model, tokenizer, config, device
 
-def _get_token_predictions_with_confidence(model, tokenizer, config, sentence, device):
+def _get_token_predictions(model, tokenizer, config, sentence, device):
     """
     Performs token classification and returns tokens, labels, and confidences.
     """
@@ -109,15 +109,23 @@ def _get_token_predictions_with_confidence(model, tokenizer, config, sentence, d
     tokens_decoded = tokenizer.convert_ids_to_tokens(inputs["input_ids"].squeeze())
     labels = [config.id2label_span[str(p.item())] for p in preds]
     confidences = [round(c.item(), 4) for c in confs]
-    return list(zip(tokens_decoded, labels, confidences))
+    
+    result = []
+    for token, label, confidence in zip(tokens_decoded, labels, confidences):
+        result.append({
+            "token": token,
+            "label": label,
+            "confidence": confidence
+        })
+    return result
 
-def _get_relation_predictions_with_confidence(model, tokenizer, config, sentence, indicator_entity_pairs, device):
+def _get_relation_predictions(model, tokenizer, config, sentence, iep, device):
     """
     Classifies relations for a given list of indicator-entity pairs.
     """
     relation_results = []
     sep_token_str = "<|parallel_sep|>"
-    for indicator, entity in indicator_entity_pairs:
+    for indicator, entity in iep:
         input_text = f"{indicator} {sep_token_str} {entity} {sep_token_str} {sentence}"
         rel_inputs = tokenizer(input_text, return_tensors="pt", truncation=True, max_length=tokenizer.model_max_length).to(device)
         with torch.no_grad():
@@ -130,14 +138,40 @@ def _get_relation_predictions_with_confidence(model, tokenizer, config, sentence
         relation_results.append(((indicator, entity), {"label": label, "confidence": confidence}))
     return relation_results
 
-def analyze_sentence_with_confidence(model, tokenizer, config, sentence, indicator_entity_pairs, device="cuda"):
+def analyze_sentence(model, tokenizer, config, sentence, iep, device="cuda", confidence=True):
     """
     Analyzes a sentence for token classification and specified relation pairs.
+
+    Args:
+        model (CausalBERTMultiTaskModel): The loaded CausalBERT model.
+        tokenizer (AutoTokenizer): The loaded tokenizer.
+        config (AutoConfig): The model configuration.
+        sentence (str): The sentence to analyze.
+        iep (list): A list of (indicator, entity) pairs for relation classification.
+        device (str, optional): The device to use for inference. Defaults to "cuda".
+        confidence (bool, optional): If True, the output will include confidence scores. Defaults to True.
+
+    Returns:
+        dict: A dictionary containing the token predictions and relation analysis results.
+              The structure of the output depends on the `confidence` flag.
     """
     result = {"tokens": [], "relations": []}
-    result["tokens"] = _get_token_predictions_with_confidence(model, tokenizer, config, sentence, device)
-    if indicator_entity_pairs:
-        result["relations"] = _get_relation_predictions_with_confidence(model, tokenizer, config, sentence, indicator_entity_pairs, device)
+    
+    # Token predictions
+    token_preds = _get_token_predictions(model, tokenizer, config, sentence, device)
+    if confidence:
+        result["tokens"] = token_preds
+    else:
+        result["tokens"] = [(token, label) for token, label, _ in token_preds]
+
+    # Relation predictions
+    if iep:
+        relation_preds = _get_relation_predictions(model, tokenizer, config, sentence, iep, device)
+        if confidence:
+            result["relations"] = relation_preds
+        else:
+            result["relations"] = [((indicator, entity), {'label': info['label']}) for (indicator, entity), info in relation_preds]
+            
     return result
 
 def merge_bio_entities(tokens, labels, confidences):
@@ -256,12 +290,12 @@ def sentence_analysis(model, tokenizer, config, sentence, device="cuda"):
     Performs a complete analysis of a sentence, including token and relation classification.
     """
     # 1. Token predictions
-    classified_tokens = _get_token_predictions_with_confidence(model, tokenizer, config, sentence, device)
+    classified_tokens = _get_token_predictions(model, tokenizer, config, sentence, device)
 
     # 2. Merge BIO spans
-    tokens = [t for (t, _, _) in classified_tokens]
-    labels = [l for (_, l, _) in classified_tokens]
-    confs = [c for (_, _, c) in classified_tokens]
+    tokens = [t["token"] for t in classified_tokens]
+    labels = [t["label"] for t in classified_tokens]
+    confs = [t["confidence"] for t in classified_tokens]
     merged_spans = merge_bio_entities(tokens, labels, confs)
 
     # 3. Derive indicators and entities
@@ -280,7 +314,7 @@ def sentence_analysis(model, tokenizer, config, sentence, device="cuda"):
             
     # 4. Classify relations
     derived_pairs = [(i, e) for i in indicators for e in entities if i != e]
-    relation_results = analyze_sentence_with_confidence(model, tokenizer, config, sentence, derived_pairs, device)
+    relation_results = analyze_sentence(model, tokenizer, config, sentence, derived_pairs, device)
 
     return {
         "sentence": sentence,

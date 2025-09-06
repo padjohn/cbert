@@ -125,14 +125,14 @@ The trained model and tokenizer will be saved to `data/model/{model_save_name}`.
 
 ### 3\. Inference and Analysis
 
-The `infer.py` script provides various functions to load your trained model and perform predictions.
+The `infer.py` script provides various functions to load your trained model and perform predictions, including confidence scores and entity merging.
 
 #### Loading the Model
 
 ```python
 from causalbert.infer import load_model
 
-model_dir = "data/model/CausalEuroBERT" # Path to your saved model, assuming run from project root
+model_path = "pdjohn/C-EBERT-210m"
 model, tokenizer, config, device = load_model(model_dir)
 
 print(f"Model loaded on {device}")
@@ -143,27 +143,42 @@ print(f"Model loaded on {device}")
 Given a sentence, predict the BIO labels for each token.
 
 ```python
-from causalbert.infer import predict_token_labels
+from causalbert.infer import analyze_sentence
 
 sentence = "Der Krieg in der Ukraine verursachte hohe Verluste."
-token_labels = predict_token_labels(model, tokenizer, config, sentence, device)
-print("Token Labels:", token_labels)
-# Example Output: [('Der', 'O'), ('Krieg', 'O'), ('in', 'O'), ('der', 'O'), ('Ukraine', 'O'), ('verursachte', 'B-INDICATOR'), ('hohe', 'O'), ('Verluste', 'B-ENTITY'), ('.', 'O')]
+result = analyze_sentence(model, tokenizer, config, sentence, [], device)
+for token, label, conf in result["tokens"]:
+    print(f"Token: {token}, Label: {label}, Confidence: {conf:.4f}")
+# Output: [('Der', 'O', 0.98), ...]
 ```
 
-#### Predicting Relation Labels
+#### Merging BIO Entities
 
-Given a sentence, an indicator, and an entity, predict the causal relation.
+Merge tokens and BIO labels into readable entity spans with average confidence.
 
 ```python
-from causalbert.infer import predict_relation_label
+from causalbert.infer import merge_bio_entities
+
+tokens = [t for t, l, c in result["tokens"]]
+labels = [l for t, l, c in result["tokens"]]
+confs = [c for t, l, c in result["tokens"]]
+merged = merge_bio_entities(tokens, labels, confs)
+for entity_text, entity_label, avg_confidence in merged:
+    print(f"Span: '{entity_text}', Type: '{entity_label}', Avg Confidence: {avg_confidence:.4f}")
+```
+
+#### Predicting Relation Labels with Confidence
+
+Given a sentence, an indicator, and an entity, predict the causal relation and confidence.
+
+```python
+from causalbert.infer import analyze_sentence
 
 sentence = "Der Krieg in der Ukraine verursachte hohe Verluste."
-indicator = "verursachte"
-entity = "hohe Verluste"
-relation = predict_relation_label(model, tokenizer, config, sentence, indicator, entity, device)
-print(f"Relation between '{indicator}' and '{entity}': {relation}")
-# Example Output: Relation between 'verursachte' and 'hohe Verluste': CAUSE
+indicator_entity_pairs = [("verursachte", "hohe Verluste")]
+result = analyze_sentence(model, tokenizer, config, sentence, indicator_entity_pairs, device)
+for (indicator, entity), rel_info in result["relations"]:
+    print(f"Indicator: '{indicator}', Entity: '{entity}', Relation: '{rel_info['label']}', Confidence: {rel_info['confidence']:.4f}")
 ```
 
 #### Batch Prediction of Relations
@@ -171,61 +186,33 @@ print(f"Relation between '{indicator}' and '{entity}': {relation}")
 Predict relations for multiple (indicator, entity, sentence) tuples efficiently.
 
 ```python
-from causalbert.infer import predict_relations_batch
-
+from causalbert.infer import analyze_sentence
 test_cases = [
     ("verursachte", "hohe Verluste", "Der Krieg in der Ukraine verursachte hohe Verluste."),
     ("Folge", "Krieg", "Als Folge des Krieges stiegen die Preise."),
 ]
-relations_batch = predict_relations_batch(model, tokenizer, config, test_cases, device)
-print("Batch Relations:", relations_batch)
+for indicator, entity, sentence in test_cases:
+    result = analyze_sentence(model, tokenizer, config, sentence, [(indicator, entity)], device)
+    print(result["relations"])
 ```
 
-#### Comprehensive Sentence Analysis with Confidence Scores
+#### Comprehensive Sentence Analysis (Automatic Extraction)
 
-Combines token classification and relation classification, providing confidence scores for each prediction. It also includes a utility to merge BIO tags into readable entity spans.
+Automatically extract indicators and entities, merge BIO spans, and classify relations.
 
 ```python
-from causalbert.infer import analyze_sentence_with_confidence, merge_bio_entities
+from causalbert.infer import sentence_analysis
 
 sentence = "Der Krieg in der Ukraine verursachte hohe Verluste und führte zu einem Anstieg der Preise."
-indicator_entity_pairs = [
-    ("verursachte", "hohe Verluste"),
-    ("führte zu", "einem Anstieg der Preise")
-]
+analysis = sentence_analysis(model, tokenizer, config, sentence, device)
 
-analysis_result = analyze_sentence_with_confidence(model, tokenizer, config, sentence, indicator_entity_pairs, device)
+print("Merged Spans:")
+for span, label, conf in analysis["merged_spans"]:
+    print(f"Span: '{span}', Label: '{label}', Avg Confidence: {conf:.4f}")
 
-print("\nDetailed Token Analysis:")
-for token, label, conf in analysis_result["tokens"]:
-    print(f"  Token: '{token}', Label: '{label}', Confidence: {conf:.4f}")
-
-merged_entities = merge_bio_entities(
-    [t for t, l, c in analysis_result["tokens"]],
-    [l for t, l, c in analysis_result["tokens"]],
-    [c for t, l, c in analysis_result["tokens"]]
-)
-print("\nMerged Entities:")
-for entity_text, entity_label, avg_confidence in merged_entities:
-    if entity_label is not None:
-        print(f"  Span: '{entity_text}', Type: '{entity_label}', Avg Confidence: {avg_confidence:.4f}")
-
-print("\nDetailed Relation Analysis:")
-for (indicator, entity), rel_info in analysis_result["relations"]:
-    print(f"  Indicator: '{indicator}', Entity: '{entity}', Relation: '{rel_info['label']}', Confidence: {rel_info['confidence']:.4f}")
-```
-
-#### Analyzing Token Embedding Trajectories
-
-Visualize how token embeddings change across the layers of the base Transformer model. This can be useful for understanding what information different layers capture.
-
-```python
-from causalbert.infer import analyze_token_trajectories
-
-sentence = "Der Krieg in der Ukraine verursachte hohe Verluste."
-target_tokens = ["verursachte", "Verluste"] # Optional: analyze specific tokens
-embedding_data = analyze_token_trajectories(model, tokenizer, sentence, target_tokens, output_json="embedding_trajectories.json")
-print(f"Embedding trajectories saved to embedding_trajectories.json")
+print("Derived Relations:")
+for (indicator, entity), rel_info in analysis["derived_relations"]:
+    print(f"Indicator: '{indicator}', Entity: '{entity}', Relation: '{rel_info['label']}', Confidence: {rel_info['confidence']:.4f}")
 ```
 
 ## Model Architecture (`model.py`)
@@ -284,4 +271,4 @@ Contributions are welcome\! Please feel free to open issues or submit pull reque
 This project is licensed under the Apache License 2.0. See the [LICENSE](./LICENSE) file for more details.
 
 **Important Note on Base Models:**
-This project utilizes and fine-tunes pre-trained Transformer models from the Hugging Face Hub, specifically `EuroBERT/EuroBERT-2.1B`, which is also licensed under Apache License 2.0. While our code is permissively licensed, **the resulting fine-tuned model (weights and configurations) will inherit the license of the base model it was trained on.** Users are advised to check the specific license of any base model they choose to use with this code to ensure compliance with their intended use cases.
+This project utilizes and fine-tunes pre-trained Transformer models from the Hugging Face Hub, specifically `EuroBERT/EuroBERT-210m`, which is also licensed under Apache License 2.0. While our code is permissively licensed, **the resulting fine-tuned model (weights and configurations) will inherit the license of the base model it was trained on.** Users are advised to check the specific license of any base model they choose to use with this code to ensure compliance with their intended use cases.

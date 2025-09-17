@@ -6,201 +6,208 @@ import os
 import logging
 import safetensors.torch
 from causalbert.model import CausalBERTMultiTaskModel
-from transformers import AutoTokenizer, AutoModel, AutoConfig 
+from transformers import AutoTokenizer, AutoConfig 
+import string
+
+logger = logging.getLogger(__name__)
 
 def load_model(model_dir, device=None):
-    # ---------------------------------------------
-    # Logging-Konfiguration
-    log_dir = "log"
-    os.makedirs(log_dir, exist_ok=True)
-    log_file_path = os.path.join(log_dir, "infer.log")
-
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.FileHandler(log_file_path, mode='w')
-        ],
-        force=True
-    )
-    # ---------------------------------------------
-
     if device is None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cuda" and torch.cuda.is_bf16_supported():
-        compute_dtype = torch.bfloat16
-    elif device == "cuda":
-        compute_dtype = torch.float16
-    else:
-        compute_dtype = torch.float32
-
+    compute_dtype = (
+        torch.bfloat16 if (device == "cuda" and torch.cuda.is_bf16_supported())
+        else (torch.float16 if device == "cuda" else torch.float32)
+    )
     logging.info(f"Using device: {device} with compute dtype: {compute_dtype}")
 
-    try:
-        config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
-        logging.info("Configuration loaded successfully.")
-        logging.debug(f"Full loaded config dict: {config.to_dict()}")
-    except Exception as e:
-        logging.error(f"Error loading config from {model_dir}: {e}")
-        raise RuntimeError(f"Error loading config from {model_dir}: {e}")
+    config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
+    logging.info("Configuration loaded.")
+    # force the actual runtime dtype into config before instantiation
+    config.torch_dtype = str(compute_dtype).replace("torch.", "")
 
     # Check for the base_model_name.
     if not hasattr(config, "base_model_name") or config.base_model_name is None:
-        logging.error(f"The 'base_model_name' key is missing or None in the config.json file located at {model_dir}.")
-        raise ValueError(
-            f"The 'base_model_name' key is missing or None in the config.json file located at {model_dir}. "
-            "Please ensure that your training script correctly saves this value."
-        )
-    
-    try:
-        model = CausalBERTMultiTaskModel(config)
-        logging.info("CausalBERTMultiTaskModel instantiated from config.")
-    except Exception as e:
-        logging.error(f"Error instantiating CausalBERTMultiTaskModel: {e}")
-        raise
+        raise ValueError("'base_model_name' missing in saved config. Please ensure training saved it.")
 
     model = CausalBERTMultiTaskModel(config)
-    
-    state_dict_path_safetensors = os.path.join(model_dir, "model.safetensors")
-    state_dict_path_pytorch = os.path.join(model_dir, "pytorch_model.bin")
+    # load weights to CPU
+    safetensors_path = os.path.join(model_dir, "model.safetensors")
+    pytorch_path = os.path.join(model_dir, "pytorch_model.bin")
 
-    loaded_state_dict = None
-    if os.path.isfile(state_dict_path_safetensors):
-        logging.info(f"Loading model weights from: {state_dict_path_safetensors}")
-        loaded_state_dict = safetensors.torch.load_file(state_dict_path_safetensors, device="cpu") 
-    elif os.path.isfile(state_dict_path_pytorch):
-        logging.info(f"Loading model weights from: {state_dict_path_pytorch}")
-        loaded_state_dict = torch.load(state_dict_path_pytorch, map_location="cpu")
+    if os.path.isfile(safetensors_path):
+        logging.info(f"Loading model weights from: {safetensors_path}")
+        loaded_state_dict = safetensors.torch.load_file(safetensors_path, device="cpu")
+    elif os.path.isfile(pytorch_path):
+        logging.info(f"Loading model weights from: {pytorch_path}")
+        loaded_state_dict = torch.load(pytorch_path, map_location="cpu")
     else:
         logging.error(f"Missing model weights file (pytorch_model.bin or model.safetensors) in {model_dir}.")
         raise FileNotFoundError(f"Missing model weights file (pytorch_model.bin or model.safetensors) in {model_dir}. Please ensure your training saved this file.")
-    
+
     model.load_state_dict(loaded_state_dict)
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_dir,
-        local_files_only=True,
-        trust_remote_code=True
-    )
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True, trust_remote_code=True)
     tokenizer.model_max_length = 512
     logging.info("Tokenizer loaded successfully.")
 
-    model.eval() 
-    model.to(device)
-    if model.dtype != compute_dtype:
-        model.to(compute_dtype)
-        logging.warning(f"Model dtype was not {compute_dtype}, converting now.")
-
-    logging.info(f"Model loaded successfully to {device} with dtype {model.dtype}")
-
+    model.to(device=device, dtype=compute_dtype)
+    logging.info(f"Model loaded to {device} with dtype {compute_dtype}")
+    model.eval()
     return model, tokenizer, config, device
 
-def predict_token_labels(model, tokenizer, config, sentence, device="cuda"):
-    tokens = tokenizer(sentence.strip(), return_tensors="pt", truncation=True, max_length=tokenizer.model_max_length).to(device)
-    with torch.no_grad():
-        out = model(**tokens, task="token")
-    preds = out["logits"].argmax(-1).squeeze().tolist()
-    input_ids = tokens["input_ids"].squeeze()
-    tokens_decoded = tokenizer.convert_ids_to_tokens(input_ids)
-    labels = [config.id2label_span.get(str(p), "O") for p in preds]
-    return list(zip(tokens_decoded, labels))
-
-def predict_relation_label(model, tokenizer, config, sentence, indicator, entity, device="cuda"):
-    sep_token_str = "<|parallel_sep|>" 
-    input_text = f"{indicator.strip()} {sep_token_str} {entity.strip()} {sep_token_str} {sentence.strip()}"
-    tokens = tokenizer(input_text, return_tensors="pt", truncation=True, padding=True, max_length=tokenizer.model_max_length).to(device)
-    with torch.no_grad():
-        out = model(**tokens, task="relation")
-    pred = out["logits"].argmax(-1).item()
-    return config.id2label_relation.get(str(pred), "None")
-
-def predict_relations_batch(model, tokenizer, config, test_cases, device="cuda"):
+def _get_token_predictions(model, tokenizer, config, sentence, device, aggregate_words=True):
     """
-    test_cases: list of (indicator, entity, sentence)
-    returns: list of relation labels
+    Performs token classification and returns tokens, labels, and confidences.
+    If aggregate_words=True, subword predictions are aggregated to one label per word.
     """
-    sep_token_str = "<|parallel_sep|>" 
-    inputs = [
-        f"{indicator} {sep_token_str} {entity} {sep_token_str} {sentence}"
-        for (indicator, entity, sentence) in test_cases
-    ]
-    encodings = tokenizer(inputs, return_tensors="pt", padding=True, truncation=True, max_length=tokenizer.model_max_length).to(device)
-
-    with torch.no_grad():
-        out = model(**encodings, task="relation")
-
-    preds = out["logits"].argmax(-1).cpu().tolist()
-    return [config.id2label_relation[str(p)] for p in preds]
-
-def analyze_sentence(model, tokenizer, config, sentence, indicators_entities=[], device="cuda"):
-    """
-    - Runs token classification
-    - Runs relation classification for given (indicator, entity) pairs
-    """
-    result = {}
-
-    # Token classification
-    token_preds = predict_token_labels(model, tokenizer, config, sentence, device)
-    result["tokens"] = token_preds
-
-    # Relation classification
-    if indicators_entities:
-        test_cases = [(i, e, sentence) for i, e in indicators_entities]
-        relation_preds = predict_relations_batch(model, tokenizer, config, test_cases, device)
-        result["relations"] = list(zip(indicators_entities, relation_preds))
-    else:
-        result["relations"] = []
-
-    return result
-
-def classify_relation(model, tokenizer, config, sentence, indicator, entity):
-    model.eval()
-    sep_token_str = "<|parallel_sep|>"
-    input_text = f"{indicator} {sep_token_str} {entity} {sep_token_str} {sentence}"
-    inputs = tokenizer(input_text, return_tensors="pt", truncation=True, max_length=tokenizer.model_max_length).to(model.device)
-
-    with torch.no_grad():
-        output = model(**inputs, task="relation")
-        logits = output["logits"].squeeze()
-        probs = F.softmax(logits, dim=-1)
-        pred_id = torch.argmax(probs).item()
-
-    return {
-        "label": config.id2label_relation[str(pred_id)],
-        "confidence": probs[pred_id].item()
-    }
-
-def analyze_sentence_with_confidence(model, tokenizer, config, sentence, indicator_entity_pairs, device="cuda"):
-    result = {"tokens": [], "relations": []}
-
-    # Token classification
+    # main forward (for logits)
     inputs = tokenizer(sentence, return_tensors="pt", truncation=True, max_length=tokenizer.model_max_length).to(device)
     with torch.no_grad():
-        out = model(**inputs, task="token")
-    logits = out["logits"]
-    probs = F.softmax(logits, dim=-1)
-    preds = logits.argmax(-1).squeeze()
-    confs = probs.max(dim=-1).values.squeeze()
+        with torch.autocast(device_type="cuda", dtype=model.dtype, enabled=(device == "cuda")):
+            out = model(**inputs, task="token")
+    logits = out["logits"]  # [B, T, C]
+    probs = F.softmax(logits, dim=-1)[0]  # [T, C]
+    pred_ids = probs.argmax(-1)           # [T]
 
-    tokens_decoded = tokenizer.convert_ids_to_tokens(inputs["input_ids"].squeeze())
-    labels = [config.id2label_span[str(p.item())] for p in preds]
-    confidences = [round(c.item(), 4) for c in confs]
-    result["tokens"] = list(zip(tokens_decoded, labels, confidences))
+    # token-level decode
+    tok_ids = inputs["input_ids"][0]
+    toks = tokenizer.convert_ids_to_tokens(tok_ids)
+    id2label = {int(k): v for k, v in config.id2label_span.items()} if isinstance(next(iter(config.id2label_span.keys())), str) else config.id2label_span
+    token_labels = [id2label[int(i.item())] for i in pred_ids]
+    token_confs  = [float(probs[i_idx, int(pred_ids[i_idx])].item()) for i_idx in range(len(tok_ids))]
 
-    # Relation classification
+    if not aggregate_words:
+        return [{"token": t, "label": l, "confidence": round(c, 4)} for t, l, c in zip(toks, token_labels, token_confs)]
+
+    # word-level aggregation (use fast tokenizer word_ids)
+    enc_fast = tokenizer(sentence, return_offsets_mapping=True, truncation=True)
+    enc = enc_fast.encodings[0]
+    word_ids = enc.word_ids  # list of len T
+    # group indices by word_id, skipping specials (None)
+    word_groups = []
+    current = []
+    last_wid = None
+    for i, wid in enumerate(word_ids):
+        if wid is None:
+            continue
+        if last_wid is None or wid == last_wid:
+            current.append(i)
+        else:
+            word_groups.append(current)
+            current = [i]
+        last_wid = wid
+    if current:
+        word_groups.append(current)
+
+    # aggregate: sum probs across subwords, pick best class per word
+    words = []
+    word_types = []  # "INDICATOR"/"ENTITY"/"O"
+    word_confs = []
+    for grp in word_groups:
+        grp_probs = probs[grp, :]              # [k, C]
+        agg_probs = grp_probs.mean(0)          # average over subwords
+        word_pred = int(agg_probs.argmax().item())
+        label = id2label[word_pred]
+        # normalize to type
+        if label == "O":
+            wtype = "O"
+        else:
+            wtype = label.split("-", 1)[-1]    # B-ENTITY -> ENTITY
+        # reconstruct surface word from subwords
+        surf = "".join(clean_tok(toks[i]) for i in grp).replace("##", "")
+        words.append(surf)
+        word_types.append(wtype)
+        word_confs.append(float(agg_probs[word_pred].item()))
+
+    # convert types to BIO across words
+    bio_labels = []
+    prev_t = "O"
+    for t in word_types:
+        if t == "O":
+            bio_labels.append("O")
+            prev_t = "O"
+        else:
+            bio_labels.append(("I-" if prev_t == t else "B-") + t)
+            prev_t = t
+
+    return [{"token": w, "label": l, "confidence": round(c, 4)} for w, l, c in zip(words, bio_labels, word_confs)]
+
+def _get_relation_predictions(model, tokenizer, config, sentence, iep, device):
+    """
+    Classifies relations for a given list of indicator-entity pairs.
+    """
+    if not iep:
+        return []
+
     sep_token_str = "<|parallel_sep|>"
-    for indicator, entity in indicator_entity_pairs:
-        input_text = f"{indicator} {sep_token_str} {entity} {sep_token_str} {sentence}"
-        rel_inputs = tokenizer(input_text, return_tensors="pt", truncation=True, max_length=tokenizer.model_max_length).to(device)
-        with torch.no_grad():
-            out = model(**rel_inputs, task="relation")
-        logits = out["logits"]
-        probs = F.softmax(logits, dim=-1)
-        pred = logits.argmax(-1).item()
-        confidence = round(probs[0][pred].item(), 4)
-        label = config.id2label_relation[str(pred)]
-        result["relations"].append(((indicator, entity), {"label": label, "confidence": confidence}))
+    combined_texts = [f"{indicator} {sep_token_str} {entity} {sep_token_str} {sentence}" for indicator, entity in iep]
+    
+    # Tokenize all pairs at once
+    rel_inputs = tokenizer(
+        combined_texts, 
+        return_tensors="pt", 
+        padding=True, 
+        truncation=True, 
+        max_length=tokenizer.model_max_length
+    ).to(device)
 
+    # Perform inference on the whole batch
+    with torch.no_grad():
+        with torch.autocast(device_type="cuda", dtype=model.dtype, enabled=(device == "cuda")):
+            out = model(**rel_inputs, task="relation")
+    
+    # The output logits tensor should be (batch_size, num_labels)
+    # The unsqueeze(1) in the model's forward pass might make it (batch_size, 1, num_labels), so we squeeze it here.
+    logits = out["logits"].squeeze(1)
+    
+    probs = F.softmax(logits, dim=-1)
+    predictions = torch.argmax(logits, dim=-1)
+    
+    relation_results = []
+    
+    for i in range(len(iep)):
+        pred = predictions[i].item()
+        confidence = round(probs[i][pred].item(), 4)
+        label = config.id2label_relation[str(pred)]
+        indicator, entity = iep[i]
+        relation_results.append(((indicator, entity), {"label": label, "confidence": confidence}))
+        
+    return relation_results
+
+def analyze_sentence(model, tokenizer, config, sentence, iep, device="cuda", confidence=True):
+    """
+    Analyzes a sentence for token classification and specified relation pairs.
+
+    Args:
+        model (CausalBERTMultiTaskModel): The loaded CausalBERT model.
+        tokenizer (AutoTokenizer): The loaded tokenizer.
+        config (AutoConfig): The model configuration.
+        sentence (str): The sentence to analyze.
+        iep (list): A list of (indicator, entity) pairs for relation classification.
+        device (str, optional): The device to use for inference. Defaults to "cuda".
+        confidence (bool, optional): If True, the output will include confidence scores. Defaults to True.
+
+    Returns:
+        dict: A dictionary containing the token predictions and relation analysis results.
+              The structure of the output depends on the `confidence` flag.
+    """
+    result = {"tokens": [], "relations": []}
+    
+    # Token predictions
+    token_preds = _get_token_predictions(model, tokenizer, config, sentence, device)
+    if confidence:
+        result["tokens"] = token_preds
+    else:
+        result["tokens"] = [(token, label) for token, label, _ in token_preds]
+
+    # Relation predictions
+    if iep:
+        relation_preds = _get_relation_predictions(model, tokenizer, config, sentence, iep, device)
+        if confidence:
+            result["relations"] = relation_preds
+        else:
+            result["relations"] = [((indicator, entity), {'label': info['label']}) for (indicator, entity), info in relation_preds]
+            
     return result
 
 # Merge BIO tags into entity spans (Revised and placed in infer.py)
@@ -279,3 +286,51 @@ def analyze_token_trajectories(model, tokenizer, sentence, target_tokens=None, o
         json.dump(data, f, indent=2)
 
     return data
+
+def clean_tok(tok: str) -> str:
+    """Clean Special Tokens and Umlauts."""
+    tok = tok.lstrip("Ġ ").strip("▁ ")
+    try:
+        tok = tok.encode("latin-1").decode("utf-8")
+    except UnicodeError:
+        pass
+    return tok
+
+
+def sentence_analysis(model, tokenizer, config, sentence, device="cuda"):
+    """
+    Performs a complete analysis of a sentence, including token and relation classification.
+    """
+    # 1. Token predictions
+    classified_tokens = _get_token_predictions(model, tokenizer, config, sentence, device)
+
+    # 2. Merge BIO spans
+    tokens = [t["token"] for t in classified_tokens]
+    labels = [t["label"] for t in classified_tokens]
+    confs = [t["confidence"] for t in classified_tokens]
+    merged_spans = merge_bio_entities(tokens, labels, confs)
+
+    # 3. Derive indicators and entities
+    indicators = []
+    entities = []
+    
+    for token, label, _ in merged_spans:
+        if all(c in string.punctuation for c in token) or token in tokenizer.all_special_tokens:
+            continue
+        cleaned_token = token.lstrip('Ġ').strip(string.punctuation)
+        
+        if label == "INDICATOR":
+            indicators.append(cleaned_token)
+        elif label == "ENTITY":
+            entities.append(cleaned_token)
+            
+    # 4. Classify relations
+    derived_pairs = [(i, e) for i in indicators for e in entities if i != e]
+    relation_results = analyze_sentence(model, tokenizer, config, sentence, derived_pairs, device)
+
+    return {
+        "sentence": sentence,
+        "token_predictions": classified_tokens,
+        "merged_spans": merged_spans,
+        "derived_relations": relation_results["relations"] 
+    }

@@ -16,6 +16,8 @@ setup(
         "wandb>=0.10.0",
         "tqdm>=4.0.0",
         "PyYAML>=5.3.1",
+        "peft>=0.17.1",
+        "evaluate>=0.4.5"
     ],
     python_requires=">=3.7",
     include_package_data=True,

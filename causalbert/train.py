@@ -8,11 +8,13 @@ import numpy as np
 from torch.utils.data import DataLoader
 from transformers import AutoConfig, AutoTokenizer
 from transformers.trainer import Trainer
+from transformers.trainer_callback import TrainerCallback
 from transformers.training_args import TrainingArguments
 from datasets.load import load_from_disk
 from causalbert.model import CausalBERTMultiTaskModel, MultiTaskCollator
 from collections import Counter
 from math import ceil
+from peft import LoraConfig, TaskType, get_peft_model, PeftModel
 
 logger = logging.getLogger(__name__)
 
@@ -71,12 +73,21 @@ class GroupByTaskBatchSampler:
             return (t // self.batch_size) + (r // self.batch_size)
         return ceil(t / self.batch_size) + ceil(r / self.batch_size)
 
+class PeftSavingCallback(TrainerCallback):
+    """
+    A custom callback to save the PEFT adapter weights during training
+    and prevent the Trainer from saving a full checkpoint to avoid redundancy.
+    """
+    def on_save(self, args, state, control, **kwargs):
+        peft_model_path = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
+        kwargs["model"].save_pretrained(peft_model_path)
+        return control
+
 class RelationTransform:
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
 
     def __call__(self, examples):
-        # This function now expects a batch (a dictionary of lists)
         tokenized_batches = []
         for i in range(len(examples["sentence"])):
             indicator = examples.get("indicator", [""])[i]
@@ -135,7 +146,9 @@ def _compute_ce_weights_from_counts(counts: Counter, num_classes: int, smoothing
     return weights
 
 
+# Load the F1 metric with a multiclass averaging method
 accuracy_metric = load("accuracy")
+f1_metric = load("f1", average="macro")
 
 def compute_metrics(eval_pred):
     logits, labels = eval_pred
@@ -144,18 +157,17 @@ def compute_metrics(eval_pred):
     # Flatten the predictions and labels
     flat_predictions = predictions.flatten()
     flat_labels = labels.flatten()
-    
-    # Filter out the padding tokens (-100) from both predictions and labels
     mask = flat_labels != -100
     filtered_predictions = flat_predictions[mask]
     filtered_labels = flat_labels[mask]
 
-    # Compute and return the accuracy
     if len(filtered_predictions) == 0:
-      # Handle the case where a batch only contains padded tokens
-      return {"accuracy": 0.0}
+      return {"accuracy": 0.0, "f1": 0.0}
       
-    return accuracy_metric.compute(predictions=filtered_predictions, references=filtered_labels)
+    accuracy_result = accuracy_metric.compute(predictions=filtered_predictions, references=filtered_labels)
+    f1_result = f1_metric.compute(predictions=filtered_predictions, references=filtered_labels, average="macro")
+    
+    return {**accuracy_result, **f1_result}
 
 class MultiTaskTrainer(Trainer):
     def get_train_dataloader(self):
@@ -201,9 +213,9 @@ def train(
     model_name="EuroBERT/EuroBERT-210m",
     model_save_name="C-EBERT",
     device=None,
-    use_wandb=True,
-    seed=42,
     training_args_overrides: dict | None = None,
+    peft_config_overrides: dict | None = None,
+    callbacks: list | None = None,
 ):
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
     logging.info(f"Using device: {device}")
@@ -239,6 +251,18 @@ def train(
             if lid != -100:
                 span_counts[int(lid)] += 1
     relation_counts = Counter(int(ex["relation"]) for ex in mt_train.filter(lambda x: x["task"] == "relation"))
+
+    total_span_tokens = sum(span_counts.values())
+    span_majority_class_count = span_counts.most_common(1)[0][1]
+    span_accuracy_baseline = span_majority_class_count / total_span_tokens
+    logging.info(f"Token Accuracy Baseline (majority class): {span_accuracy_baseline:.4f}")
+
+    # For relations, the logic is the same
+    total_relations = sum(relation_counts.values())
+    relation_majority_class_count = relation_counts.most_common(1)[0][1]
+    relation_accuracy_baseline = relation_majority_class_count / total_relations
+    logging.info(f"Relation Accuracy Baseline (majority class): {relation_accuracy_baseline:.4f}")
+
     span_class_weights_list = _compute_ce_weights_from_counts(span_counts, num_classes=len(span_label_map))
     relation_class_weights_list = _compute_ce_weights_from_counts(relation_counts, num_classes=len(relation_label_map))
 
@@ -277,6 +301,7 @@ def train(
         group_by_length=False,
         dataloader_drop_last=False,
         dataloader_num_workers=0,
+        save_only_model=True
     )
 
     if training_args_overrides:
@@ -285,7 +310,24 @@ def train(
                 setattr(training_args, k, v)
             else:
                 logging.warning(f"Ignoring unknown TrainingArguments field: {k}")
+    default_peft_config = {
+        "task_type": TaskType.TOKEN_CLS,
+        "inference_mode": False,
+        "r": 8,
+        "lora_alpha": 32,
+        "lora_dropout": 0.1,
+        "target_modules": ["q_proj", "v_proj"],
+    }
+    if peft_config_overrides:
+        logging.info("Overriding default PEFT config with user-provided values.")
+        default_peft_config.update(peft_config_overrides)    
+    peft_config = LoraConfig(**default_peft_config)
 
+    all_callbacks = []
+    if callbacks:
+        all_callbacks.extend(callbacks)
+    
+    model = get_peft_model(model, peft_config)
     trainer = MultiTaskTrainer(
         model=model,
         args=training_args,
@@ -294,12 +336,15 @@ def train(
         data_collator=collator,
         processing_class=tokenizer,
         compute_metrics=compute_metrics,
+        callbacks=all_callbacks,
     )
 
     trainer.train()
+    model.to("cpu")  # Move model to CPU for memory efficiency before merging
+    merged_model = model.merge_and_unload()
 
     # Save
     save_dir = training_args.output_dir
-    trainer.save_model(save_dir)
+    merged_model.save_pretrained(save_dir)
     tokenizer.save_pretrained(save_dir)
     logging.info(f"Model saved to {save_dir}")

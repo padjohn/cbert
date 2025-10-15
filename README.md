@@ -16,6 +16,24 @@ This repository holds the code to create **datasets**, **train**, and run **infe
 * **Weighted Loss**: Dynamically calculates and applies class weights during training to address potential class imbalance in both token and relation datasets.
 * **Command-Line Inference**: Provides a simple command-line interface for running automatic causal extraction on new sentences.
 
+## Example
+> *Die Bundesregierung will das Waldsterben stoppen.*
+
+| Token | BIO Label | Confidence |
+| :--- | :--- | :--- |
+| Die | O | 0.9727 |
+| **Bundesregierung** | **B-ENTITY** | **0.6602** |
+| will | O | 0.9492 |
+| das | O | 0.9453 |
+| **Waldsterben** | **B-ENTITY** | **0.6719** |
+| **stoppen** | **B-INDICATOR** | **0.4980** |
+| . | O | 0.9727 |
+
+| Indicator | Entity | Relation Label | Confidence |
+| :--- | :--- | :--- | :--- |
+| **stoppen** | **Bundesregierung** | **MONO\_POS\_CAUSE** | **0.9922** |
+| **stoppen** | **Waldsterben** | **MONO\_NEG\_EFFECT** | **0.9961** |
+
 ## Installation
 
 To set up the environment, clone the repository and install the package using pip:

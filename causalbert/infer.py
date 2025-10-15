@@ -89,7 +89,7 @@ def load_model(model_dir, device=None):
 
     model.load_state_dict(loaded_state_dict)
 
-    tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=True, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_dir, local_files_only=False, trust_remote_code=True)
     tokenizer.model_max_length = 512
     logging.info("Tokenizer loaded successfully.")
 

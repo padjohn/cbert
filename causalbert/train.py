@@ -83,54 +83,12 @@ class PeftSavingCallback(TrainerCallback):
         kwargs["model"].save_pretrained(peft_model_path)
         return control
 
-class RelationTransform:
-    def __init__(self, tokenizer):
-        self.tokenizer = tokenizer
-
-    def __call__(self, examples):
-        tokenized_batches = []
-        for i in range(len(examples["sentence"])):
-            indicator = examples.get("indicator", [""])[i]
-            entity = examples.get("entity", [""])[i]
-            sentence = examples["sentence"][i]
-            sep_token_str = "<|parallel_sep|>" 
-            
-            combined_input = f"{indicator} {sep_token_str} {entity} {sep_token_str} {sentence}"
-            tokenized = self.tokenizer(combined_input, truncation=True, max_length=self.tokenizer.model_max_length)
-
-            tokenized.update({
-                "task": "relation",
-                "labels_scalar": int(examples["relation"][i]),
-                "labels_seq": [-100] * len(tokenized["input_ids"])
-            })
-            tokenized_batches.append(tokenized)
-
-        combined_batch = {key: [d[key] for d in tokenized_batches] for key in tokenized_batches[0]}
-        
-        return combined_batch
-
 def add_labels_seq(example):
     return {
         **example,
         "task": ["token"] * len(example["input_ids"]),
         "labels_seq": example.get("labels", [-100] * len(example["input_ids"]))
     }
-
-def preprocess_relation(example, tokenizer):
-    indicator = example.get("indicator", "")
-    entity = example.get("entity", "")
-    sentence = example["sentence"]
-    sep_token_str = "<|parallel_sep|>" 
-    
-    combined_input = f"{indicator} {sep_token_str} {entity} {sep_token_str} {sentence}"
-    tokenized = tokenizer(combined_input, truncation=True, max_length=tokenizer.model_max_length)
-
-    tokenized.update({
-        "task": "relation",
-        "labels_scalar": int(example["relation"]),
-        "labels_seq": [-100] * len(tokenized["input_ids"])
-    })
-    return tokenized
 
 def _compute_ce_weights_from_counts(counts: Counter, num_classes: int, smoothing: float = 1.0,
                                     max_ratio: float = 10.0) -> list[float]:
@@ -241,6 +199,13 @@ def train(
     if test_dir and os.path.exists(test_dir):
         mt_test  = load_from_disk(test_dir)
     logging.info(f"Loaded multitask train: total={len(mt_train)}; test={len(mt_test) if mt_test else 0}")
+
+    if mt_test is not None:
+        mt_test_token = mt_test.filter(lambda x: x["task"] == "token")
+        mt_test_relation = mt_test.filter(lambda x: x["task"] == "relation")
+    else:
+        mt_test_token = None
+        mt_test_relation = None
 
     # class weights
     collator = MultiTaskCollator(tokenizer)
@@ -353,7 +318,7 @@ def train(
         model=model,
         args=training_args,
         train_dataset=mt_train,
-        eval_dataset=mt_test if mt_test is not None else None,
+        eval_dataset=mt_test_token if mt_test_token is not None else None,
         data_collator=collator,
         processing_class=tokenizer,
         compute_metrics=compute_metrics,
@@ -361,6 +326,21 @@ def train(
     )
 
     trainer.train()
+
+    if mt_test_token is not None and len(mt_test_token) > 0:
+        token_metrics = trainer.evaluate(
+            eval_dataset=mt_test_token,
+            metric_key_prefix="token_eval"
+        )
+        print(f"Token Classification Evaluation: {token_metrics}")
+
+    if mt_test_relation is not None and len(mt_test_relation) > 0:
+        relation_metrics = trainer.evaluate(
+            eval_dataset=mt_test_relation,
+            metric_key_prefix="relation_eval"
+        )
+        print(f"Relation Classification Evaluation: {relation_metrics}")
+
     model.to("cpu")
     merged_model = model.merge_and_unload()
 

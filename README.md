@@ -157,8 +157,8 @@ The `train.py` script handles the end-to-end training workflow:
 
 ## ToDo
   - Comprehensive evaluation metrics (F1-score, precision, recall) for both tasks across the entire test set.
-  - example_input.json
-  - Infer to output.json
+  - ``example_input.json``
+  - Infer to ``output.json``
 
 ## Contributing
 Contributions are welcome\! Please feel free to open issues or submit pull requests.

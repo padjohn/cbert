@@ -4,6 +4,7 @@ import numpy as np
 import torch.nn.functional as F
 import os 
 import logging
+import tqdm
 import safetensors.torch
 from causalbert.model import CausalBERTMultiTaskModel
 from transformers import AutoTokenizer, AutoConfig 

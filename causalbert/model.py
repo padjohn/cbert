@@ -1,10 +1,12 @@
 import torch.nn as nn
+import torch.nn.functional as F
 import torch
 import logging
 from transformers import AutoModel
 from transformers.modeling_utils import PreTrainedModel
 from transformers.configuration_utils import PretrainedConfig
-from torch.nn import CrossEntropyLoss
+
+logger = logging.getLogger(__name__)
 
 class CausalBERTMultiTaskConfig(PretrainedConfig):
     model_type = "causalbert_multitask"
@@ -32,19 +34,25 @@ class CausalBERTMultiTaskModel(PreTrainedModel):
         logging.info(f"  - Num Span Labels: {config.num_span_labels}")
         logging.info(f"  - Num Relation Labels: {config.num_relation_labels}")
         
-        torch_dtype_val = None
-        if getattr(config, "torch_dtype", None) == "float16":
-            torch_dtype_val = torch.float16
-        elif getattr(config, "torch_dtype", None) == "bfloat16":
-            torch_dtype_val = torch.bfloat16
-        elif getattr(config, "torch_dtype", None) == "float32":
-            torch_dtype_val = torch.float32
+        # Prefer bf16 > f16 > f32; respect explicit user override for bf16/f16
+        dtype_str = getattr(config, "torch_dtype", None)
+        if dtype_str in ("bfloat16", "float16"):
+            torch_dtype_val = getattr(torch, dtype_str)
+        else:
+            # auto-detect based on runtime
+            torch_dtype_val = (
+                torch.bfloat16 if (torch.cuda.is_available() and torch.cuda.is_bf16_supported())
+                else (torch.float16 if torch.cuda.is_available() else torch.float32)
+            )
 
         self.bert = AutoModel.from_pretrained(
             config.base_model_name,
             trust_remote_code=True,
             torch_dtype=torch_dtype_val
         )
+        # persist the actual dtype used
+        config.torch_dtype = str(torch_dtype_val).replace("torch.", "")
+        logging.info(f"Loaded base model with dtype: {config.torch_dtype}")
         
         if len(self.bert.get_input_embeddings().weight) != config.vocab_size:
             self.bert.resize_token_embeddings(config.vocab_size)
@@ -56,14 +64,15 @@ class CausalBERTMultiTaskModel(PreTrainedModel):
         self.post_init()
         logging.info("Model classifiers for token and relation tasks initialized.")
 
-        self.relation_loss_weights = None
-        if config.relation_class_weights is not None:
-            self.relation_loss_weights = torch.tensor(config.relation_class_weights, dtype=torch.float32)
-            logging.info(f"Loaded relation loss weights: {self.relation_loss_weights}")
-        self.token_loss_weights = None
-        if config.span_class_weights is not None:
-            self.token_loss_weights = torch.tensor(config.span_class_weights, dtype=torch.float32)
-            logging.info(f"Loaded token loss weights: {self.token_loss_weights}")
+        self.span_loss = nn.CrossEntropyLoss(
+            weight=(torch.tensor(config.span_class_weights, dtype=torch.float)
+                    if getattr(config, "span_class_weights", None) else None),
+            ignore_index=-100
+        )
+        self.relation_loss = nn.CrossEntropyLoss(
+            weight=(torch.tensor(config.relation_class_weights, dtype=torch.float)
+                    if getattr(config, "relation_class_weights", None) else None)
+        )
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -81,96 +90,147 @@ class CausalBERTMultiTaskModel(PreTrainedModel):
         if token_type_ids is not None and getattr(self.bert.config, "type_vocab_size", 0) > 1:
             bert_inputs["token_type_ids"] = token_type_ids
         out = self.bert(**bert_inputs)
-
+        
         if task == "token":
-            logits = self.token_classifier(out.last_hidden_state)
+            token_logits = self.token_classifier(out.last_hidden_state)
+            loss = None
+            if labels is not None:
+                # [B, L, C] -> [B*L, C], labels -> [B*L]
+                loss = self.span_loss(
+                    token_logits.view(-1, token_logits.size(-1)),
+                    labels.view(-1)
+                )
+            return {"loss": loss, "logits": token_logits}
+
         elif task == "relation":
-            logits = self.relation_classifier(out.last_hidden_state[:,0])
+            relation_logits = self.relation_classifier(out.last_hidden_state[:, 0])
+            relation_logits = relation_logits.unsqueeze(1)
+            
+            loss = None
+            if labels is not None:
+                if labels.dim() < 2:
+                    labels = labels.unsqueeze(-1)
+                loss = self.relation_loss(relation_logits.squeeze(1), labels.squeeze(-1))            
+            return {"loss": loss, "logits": relation_logits}
+
         else:
             logging.error(f"Invalid task specified: {task}. Must be 'token' or 'relation'.")
             raise ValueError(f"Task must be 'token' or 'relation', but got {task}")
-        
-        loss = None
-        if labels is not None:
-            if task == "token":
-                if self.token_loss_weights is not None:
-                    loss_fct = CrossEntropyLoss(ignore_index=-100, weight=self.token_loss_weights.to(labels.device))
-                else:
-                    loss_fct = CrossEntropyLoss(ignore_index=-100)
-                logits_flat = logits.view(-1, logits.size(-1))
-                labels_flat = labels.view(-1)
-                loss = loss_fct(logits_flat, labels_flat)
-            elif task == "relation":
-                if self.relation_loss_weights is not None:
-                    loss_fct = CrossEntropyLoss(weight=self.relation_loss_weights.to(labels.device))
-                else:
-                    loss_fct = CrossEntropyLoss()
-                loss = loss_fct(logits, labels)
-            else:
-                pass
-
-        return {"loss": loss, "logits": logits}
 
 AutoModel.register(CausalBERTMultiTaskConfig, CausalBERTMultiTaskModel)
 
 class MultiTaskCollator:
     def __init__(self, tokenizer):
         self.tokenizer = tokenizer
+        self.label2id = {
+            "O": 0,
+            "B-INDICATOR": 1,
+            "I-INDICATOR": 2,
+            "B-ENTITY": 3,
+            "I-ENTITY": 4,
+        }
+
+    def _labels_from_spans(self, enc, spans):
+        # enc: tokenizer Encoding (per-sample)
+        tokens = enc.tokens
+        offsets = enc.offsets
+        word_ids = enc.word_ids
+
+        # -100 for special tokens, else "O"
+        labels = [-100 if wid is None else self.label2id["O"] for wid in word_ids]
+
+        # sort spans 
+        spans_sorted = sorted(spans, key=lambda x: (x["start"], x["end"]))
+        for span in spans_sorted:
+            s, e = span["start"], span["end"]
+            t = span["type"]  # "INDICATOR" or "ENTITY"
+            started = False
+
+            for i, wid in enumerate(word_ids):
+                if wid is None:
+                    continue
+                ts, te = offsets[i]
+
+                # Adjust for leading markers
+                tok = tokens[i]
+                if (tok.startswith("Ġ") or tok.startswith("▁")) and ts < te:
+                    ts += 1
+
+                if max(s, ts) < min(e, te):
+                    if labels[i] != self.label2id["O"] and labels[i] != -100:
+                        continue
+                    tag = f"B-{t}" if not started else f"I-{t}"
+                    labels[i] = self.label2id[tag]
+                    started = True
+
+        return labels
 
     def __call__(self, features):
-        task = features[0]["task"]
+        f0 = features[0]
+        task = f0.get("task")
+        if task is None:
+            task = "relation" if ("relation" in f0 and "indicator" in f0) else "token"
+        if not all((f.get("task", task) == task) for f in features):
+            raise ValueError("Mixed 'task' values in a batch. Ensure batches are homogeneous.")
 
         if task == "relation":
+            sep = "<|parallel_sep|>"
             indicators = [f.get("indicator", "") for f in features]
-            entities = [f.get("entity", "") for f in features]
-            sentences = [f["sentence"] for f in features]
-            sep_token_str = "<|parallel_sep|>" 
-            
-            combined_inputs = [f"{i} {sep_token_str} {e} {sep_token_str} {s}" for i, e, s in zip(indicators, entities, sentences)]
-            
-            batch = self.tokenizer(
-                combined_inputs,
+            entities   = [f.get("entity", "") for f in features]
+            sentences  = [f["sentence"] for f in features]
+            combined   = [f"{i} {sep} {e} {sep} {s}" for i, e, s in zip(indicators, entities, sentences)]
+            toks = self.tokenizer(
+                combined,
                 padding=True,
                 truncation=True,
                 max_length=self.tokenizer.model_max_length,
-                return_tensors="pt"
+                return_tensors="pt",
+            )
+            labels = torch.tensor([int(f["relation"]) for f in features], dtype=torch.long)
+
+            if labels.dim() == 1:
+                labels = labels.unsqueeze(1)
+            batch = {**toks, "labels": labels, "task": "relation"}
+            return batch
+
+        if "sentence" in f0 and "spans" in f0:
+            sentences = [f["sentence"] for f in features]
+            
+            # Correctly tokenize the batch with padding enabled
+            encodings = self.tokenizer(
+                sentences,
+                padding=True,
+                truncation=True,
+                max_length=self.tokenizer.model_max_length,
+                return_offsets_mapping=True,
+                return_tensors="pt",
             )
             
-            labels_scalar = [f["relation"] for f in features]
-            batch["labels"] = torch.tensor(labels_scalar, dtype=torch.long)
-            batch["task"] = task
+            # Get the padded length from the tokenizer output
+            max_length = encodings["input_ids"].size(1)
 
-        elif task == "token":
-            input_keys = ["input_ids", "attention_mask", "token_type_ids"]
-            max_len = self.tokenizer.model_max_length
+            per_labels = []
+            for i, f in enumerate(features):
+                # Pass the tokenized encoding to your label function
+                labels_i = self._labels_from_spans(encodings.encodings[i], f.get("spans", []))
+                
+                # Pad the labels to the max length
+                padded_labels_i = labels_i + [-100] * (max_length - len(labels_i))
+                per_labels.append(padded_labels_i)
 
-            clean_inputs = []
-            for f in features:
-                ci = {}
-                for k in input_keys:
-                    if k not in f:
-                        continue
-                    v = f[k]
-                    if isinstance(v, list) and len(v) > max_len:
-                        v = v[:max_len]
-                    ci[k] = v
-                clean_inputs.append(ci)
+            labels = torch.tensor(per_labels, dtype=torch.long)
+            # Ensure labels tensor is always at least 2D
+            if labels.dim() == 1:
+                labels = labels.unsqueeze(1)
 
-            batch = self.tokenizer.pad(
-                clean_inputs,
-                padding=True,
-                return_tensors="pt"
-            )
-            seq_len = batch["input_ids"].size(1)
-
-            labels_seq = [f["labels_seq"] for f in features]
-            padded_labels = [
-                l[:seq_len] + [-100] * max(0, seq_len - len(l))
-                for l in labels_seq
-            ]
-            batch["labels"] = torch.tensor(padded_labels, dtype=torch.long)
-            batch["task"] = "token"
+            # Create the final labels tensor
+            encodings["labels"] = torch.tensor(per_labels, dtype=torch.long)
+            encodings["task"] = "token"
+            
+            if "offset_mapping" in encodings:
+                del encodings["offset_mapping"]
+                
+            return encodings
 
         else:
             raise ValueError("Task must be 'token' or 'relation'")
-        return batch

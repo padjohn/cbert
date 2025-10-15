@@ -209,7 +209,9 @@ class MultiTaskTrainer(Trainer):
         )
 
 def train(
-    base_dir='../data',
+    train_dir=None,
+    test_dir=None,
+    out_dir="",
     model_name="EuroBERT/EuroBERT-210m",
     model_save_name="C-EBERT",
     device=None,
@@ -232,14 +234,33 @@ def train(
         logging.info("Added '<|parallel_sep|>' to tokenizer vocabulary.")
 
     # load datasets (train/test multitask)
-    mt_train = load_from_disk(os.path.join(base_dir, 'dataset/multitask/train'))
-    mt_test  = load_from_disk(os.path.join(base_dir, 'dataset/multitask/test')) if os.path.exists(os.path.join(base_dir, 'dataset/multitask/test')) else None
+    if train_dir == None or not os.path.exists(train_dir):
+        print("Please provide a valid train_dir path.")
+        return
+    mt_train = load_from_disk(train_dir)
+    if test_dir and os.path.exists(test_dir):
+        mt_test  = load_from_disk(test_dir)
     logging.info(f"Loaded multitask train: total={len(mt_train)}; test={len(mt_test) if mt_test else 0}")
 
     # class weights
     collator = MultiTaskCollator(tokenizer)
     span_label_map = {"O": 0, "B-INDICATOR": 1, "I-INDICATOR": 2, "B-ENTITY": 3, "I-ENTITY": 4}
-    relation_label_map = {"NO_RELATION": 0, "CAUSE": 1, "EFFECT": 2, "INTERDEPENDENCY": 3}
+    relation_label_map = {
+        "NO_RELATION": 0,
+        "MONO_POS_CAUSE": 1,
+        "DIST_POS_CAUSE": 2,
+        "PRIO_POS_CAUSE": 3,
+        "MONO_NEG_CAUSE": 4,
+        "DIST_NEG_CAUSE": 5,
+        "PRIO_NEG_CAUSE": 6,
+        "MONO_POS_EFFECT": 7,
+        "DIST_POS_EFFECT": 8,
+        "PRIO_POS_EFFECT": 9,
+        "MONO_NEG_EFFECT": 10,
+        "DIST_NEG_EFFECT": 11,
+        "PRIO_NEG_EFFECT": 12,
+        "INTERDEPENDENCY": 13,
+    }
     id2span_label = {v: k for k, v in span_label_map.items()}
     id2relation_label = {v: k for k, v in relation_label_map.items()}
 
@@ -283,7 +304,7 @@ def train(
     model = CausalBERTMultiTaskModel(config)
 
     training_args = TrainingArguments(
-        output_dir=os.path.join(base_dir, f"model/{model_save_name}"),
+        output_dir=os.path.join(out_dir, f"{model_save_name}"),
         num_train_epochs=5,
         per_device_train_batch_size=32,
         per_device_eval_batch_size=32,
@@ -340,7 +361,7 @@ def train(
     )
 
     trainer.train()
-    model.to("cpu")  # Move model to CPU for memory efficiency before merging
+    model.to("cpu")
     merged_model = model.merge_and_unload()
 
     # Save

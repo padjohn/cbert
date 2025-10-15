@@ -86,9 +86,20 @@ def _augment_data(data, replacements):
         
     return original_data + augmented_data
 
+def _check_coefficient(data: dict, coeff_name: str) -> bool:
+    """Checks if a coefficient is present in the main 'coefficient' field or 'dependent_coefficients'."""
+    if data.get("coefficient") == coeff_name:
+        return True
+    
+    indicator_coeffs = [dc.get("coefficient") for dc in data.get("dependent_coefficients", [])]
+    if coeff_name in indicator_coeffs:
+        return True
+        
+    return False
+
 def create_datasets(
     input_json: str,
-    base_dir='',
+    out_dir='',
     include_empty=False,
     debug=False,
     augment=0,
@@ -106,9 +117,19 @@ def create_datasets(
     
     relation_map = {
         "NO_RELATION": 0,
-        "CAUSE": 1,
-        "EFFECT": 2,
-        "INTERDEPENDENCY": 3,
+        "MONO_POS_CAUSE": 1,
+        "DIST_POS_CAUSE": 2,
+        "PRIO_POS_CAUSE": 3,
+        "MONO_NEG_CAUSE": 4,
+        "DIST_NEG_CAUSE": 5,
+        "PRIO_NEG_CAUSE": 6,
+        "MONO_POS_EFFECT": 7,
+        "DIST_POS_EFFECT": 8,
+        "PRIO_POS_EFFECT": 9,
+        "MONO_NEG_EFFECT": 10,
+        "DIST_NEG_EFFECT": 11,
+        "PRIO_NEG_EFFECT": 12,
+        "INTERDEPENDENCY": 13,
     }
 
     def normalize_relation_label(relation):
@@ -186,6 +207,11 @@ def create_datasets(
                 logger.warning(f"Skipping relation. Indicator '{indicator_text_cleaned}' not found in cleaned sentence: '{original_sentence}' -> '{cleaned_sentence_text}'")
                 continue
 
+            # Relation-level flags based on indicator's coefficients
+            N_Relation = _check_coefficient(relation, "Negation")
+            D_Relation = _check_coefficient(relation, "Division")
+            P_Relation = _check_coefficient(relation, "Priority")
+
             for entity_data in relation["entities"]:
                 entity_text_cleaned = clean_sentence(entity_data["entity"])
                 
@@ -193,8 +219,25 @@ def create_datasets(
                     logger.warning(f"Skipping relation. Entity '{entity_text_cleaned}' not found in cleaned sentence for indicator '{indicator_text_cleaned}': '{original_sentence}' -> '{cleaned_sentence_text}'")
                     continue
 
-                original_relation_type_str = entity_data["relation"].upper()
-                relation_type = normalize_relation_label(original_relation_type_str)
+                original_relation_type = entity_data["relation"].upper()
+                N_Own_Entity = _check_coefficient(entity_data, "Negation")
+                D_Own_Entity = _check_coefficient(entity_data, "Division")
+                P_Own_Entity = _check_coefficient(entity_data, "Priority")
+
+                # Apply propagation rules
+                N_Entity = N_Own_Entity or (N_Relation and original_relation_type == "EFFECT")
+                D_Entity = D_Own_Entity or (D_Relation and original_relation_type == "CAUSE")
+                P_Entity = P_Own_Entity or (P_Relation and original_relation_type == "CAUSE")
+
+                # Construct the final, descriptive relation label
+                if original_relation_type == "INTERDEPENDENCY":
+                    final_relation_type = "INTERDEPENDENCY"
+                else:
+                    polarity = "NEG" if N_Entity else "POS"
+                    distribution = "PRIO" if P_Entity else ("DIST" if D_Entity else "MONO")
+                    final_relation_type = f"{distribution}_{polarity}_{original_relation_type}"
+
+                relation_type = normalize_relation_label(final_relation_type)
                 data_relations.append({
                     "sentence": cleaned_sentence_text,
                     "indicator": indicator_text_cleaned,
@@ -244,10 +287,9 @@ def create_datasets(
     multitask_train = concatenate_datasets([ds for ds in [tokens_train, rel_train] if len(ds) > 0])
     multitask_test  = concatenate_datasets([ds for ds in [tokens_test,  rel_test]  if len(ds) > 0])
 
-    output_dir_multitask = os.path.join(base_dir, "dataset/multitask")
-    os.makedirs(output_dir_multitask, exist_ok=True)
-    multitask_train.save_to_disk(os.path.join(output_dir_multitask, "train"))
-    multitask_test.save_to_disk(os.path.join(output_dir_multitask, "test"))
-    logger.info(f"Saved multitask datasets to {output_dir_multitask}")
+    os.makedirs(out_dir, exist_ok=True)
+    multitask_train.save_to_disk(os.path.join(out_dir, "train"))
+    multitask_test.save_to_disk(os.path.join(out_dir, "test"))
+    logger.info(f"Saved multitask datasets to {out_dir}")
 
     print("Token and Relation Classification datasets created and saved.")

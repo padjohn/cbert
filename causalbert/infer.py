@@ -4,10 +4,10 @@ import numpy as np
 import torch.nn.functional as F
 import os 
 import logging
+import tqdm
 import safetensors.torch
 from causalbert.model import CausalBERTMultiTaskModel
 from transformers import AutoTokenizer, AutoConfig 
-import string
 
 logger = logging.getLogger(__name__)
 
@@ -48,11 +48,11 @@ def analyze_token_trajectories(model, tokenizer, sentence, target_tokens=None, o
     return data
 
 def clean_tok(tok: str) -> str:
-    """Clean Special Tokens and Umlauts."""
-    tok = tok.lstrip("Ġ ").strip("▁ ")
+    """Clean special tokens and fix umlaut encoding."""
+    tok = tok.lstrip("Ġ ").strip("  ")
     try:
-        tok = tok.encode("latin-1").decode("utf-8")
-    except UnicodeError:
+        tok = tok.encode('latin1').decode('utf-8')
+    except (UnicodeEncodeError, UnicodeDecodeError):
         pass
     return tok
 
@@ -67,7 +67,6 @@ def load_model(model_dir, device=None):
 
     config = AutoConfig.from_pretrained(model_dir, trust_remote_code=True)
     logging.info("Configuration loaded.")
-    # force the actual runtime dtype into config before instantiation
     config.torch_dtype = str(compute_dtype).replace("torch.", "")
 
     # Check for the base_model_name.
@@ -75,7 +74,6 @@ def load_model(model_dir, device=None):
         raise ValueError("'base_model_name' missing in saved config. Please ensure training saved it.")
 
     model = CausalBERTMultiTaskModel(config)
-    # load weights to CPU
     safetensors_path = os.path.join(model_dir, "model.safetensors")
     pytorch_path = os.path.join(model_dir, "pytorch_model.bin")
 
@@ -170,7 +168,7 @@ def _get_token_predictions(model, tokenizer, config, sentences, device, aggregat
 
     return all_token_predictions
 
-def _get_relation_predictions(model, tokenizer, config, sentences_and_pairs, device):
+def _get_relation_predictions(model, tokenizer, config, sentences_and_pairs, device, rel_per_sentence=50):
     """
     Classifies relations for a list of (sentence, iep) pairs in a single batch.
     `sentences_and_pairs` should be a list of tuples: [(sentence, iep), ...].
@@ -180,6 +178,9 @@ def _get_relation_predictions(model, tokenizer, config, sentences_and_pairs, dev
     sep_token_str = "<|parallel_sep|>"
     
     for sentence, iep in sentences_and_pairs:
+        if len(iep) > rel_per_sentence:
+            logging.warning(f"Sentence has {len(iep)} relations, limiting to {rel_per_sentence}")
+            iep = iep[:rel_per_sentence]
         for indicator, entity in iep:
             combined_texts.append(f"{indicator} {sep_token_str} {entity} {sep_token_str} {sentence}")
             original_pairs.append((indicator, entity))
@@ -222,7 +223,6 @@ def merge_bio_entities(classified_tokens):
 
     Returns:
         list: A list of merged spans, each with a single label and average confidence.
-              Example: [('effect', 'EFFECT', 0.95), ('causal factors', 'INDICATOR', 0.88)]
     """
     merged = []
     current_tokens = []
@@ -267,15 +267,15 @@ def merge_bio_entities(classified_tokens):
 
     return merged
 
-def sentence_analysis(model, tokenizer, config, sentences, device="cuda", batch_size=16):
+def sentence_analysis(model, tokenizer, config, sentences, device="cuda", batch_size=32, rel_per_sentence=50):
     all_results = []
     
-    for i in range(0, len(sentences), batch_size):
+    for i in tqdm.tqdm(range(0, len(sentences), batch_size), desc="Batches"):
         batch_sentences = sentences[i:i + batch_size]
     
         batch_token_preds = _get_token_predictions(model, tokenizer, config, batch_sentences, device)
         
-        all_relation_pairs_in_batch = []
+        relation_pairs_in_batch = []
         sentence_info_in_batch = []
         for j, sentence in enumerate(batch_sentences):
             merged_spans = merge_bio_entities(batch_token_preds[j])
@@ -286,7 +286,7 @@ def sentence_analysis(model, tokenizer, config, sentences, device="cuda", batch_
             
             # Create pairs and a unique ID for each pair
             derived_pairs = [(ind_tok, ent_tok) for (ind_tok, ind_conf) in indicators for (ent_tok, ent_conf) in entities if ind_tok != ent_tok]
-            all_relation_pairs_in_batch.append((sentence, derived_pairs))
+            relation_pairs_in_batch.append((sentence, derived_pairs))
             
             sentence_info_in_batch.append({
                 "sentence": sentence,
@@ -295,12 +295,12 @@ def sentence_analysis(model, tokenizer, config, sentences, device="cuda", batch_
                 "derived_relations": [] 
             })
 
-        if all_relation_pairs_in_batch:
-            relation_results = _get_relation_predictions(model, tokenizer, config, all_relation_pairs_in_batch, device)
-            
+        if relation_pairs_in_batch:
+            relation_results = _get_relation_predictions(model, tokenizer, config, relation_pairs_in_batch, device, rel_per_sentence=rel_per_sentence)
+
             current_pair_idx = 0
             for j in range(len(batch_sentences)):
-                sentence_pairs = all_relation_pairs_in_batch[j][1]
+                sentence_pairs = relation_pairs_in_batch[j][1]
                 num_pairs = len(sentence_pairs)
                 if num_pairs > 0:
                     sentence_info_in_batch[j]["derived_relations"] = relation_results[current_pair_idx : current_pair_idx + num_pairs]
@@ -309,3 +309,5 @@ def sentence_analysis(model, tokenizer, config, sentences, device="cuda", batch_
         all_results.extend(sentence_info_in_batch)
 
     return all_results
+
+

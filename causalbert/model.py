@@ -90,8 +90,7 @@ class CausalBERTMultiTaskModel(PreTrainedModel):
         if token_type_ids is not None and getattr(self.bert.config, "type_vocab_size", 0) > 1:
             bert_inputs["token_type_ids"] = token_type_ids
         out = self.bert(**bert_inputs)
-
-        max_labels = max(self.config.num_span_labels, self.config.num_relation_labels)
+        
         if task == "token":
             token_logits = self.token_classifier(out.last_hidden_state)
             loss = None
@@ -101,9 +100,6 @@ class CausalBERTMultiTaskModel(PreTrainedModel):
                     token_logits.view(-1, token_logits.size(-1)),
                     labels.view(-1)
                 )
-            if token_logits.size(-1) < max_labels:
-                padding_needed = max_labels - token_logits.size(-1)
-                token_logits = F.pad(token_logits, (0, padding_needed), 'constant', -1e9)
             return {"loss": loss, "logits": token_logits}
 
         elif task == "relation":
@@ -114,12 +110,7 @@ class CausalBERTMultiTaskModel(PreTrainedModel):
             if labels is not None:
                 if labels.dim() < 2:
                     labels = labels.unsqueeze(-1)
-                loss = self.relation_loss(relation_logits.squeeze(1), labels.squeeze(-1))
-            
-            if relation_logits.size(-1) < max_labels:
-                padding_needed = max_labels - relation_logits.size(-1)
-                relation_logits = F.pad(relation_logits, (0, padding_needed), 'constant', -1e9)
-            
+                loss = self.relation_loss(relation_logits.squeeze(1), labels.squeeze(-1))            
             return {"loss": loss, "logits": relation_logits}
 
         else:

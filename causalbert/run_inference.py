@@ -1,5 +1,4 @@
 import argparse
-import os
 import logging
 from causalbert.infer import load_model, sentence_analysis, clean_tok
 

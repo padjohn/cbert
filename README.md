@@ -1,23 +1,38 @@
-# CausalBERT: A Multi-Task Model for German Causal Relation Extraction
+# CausalBERT: Extracting Causal Attribution
 
-CausalBERT is a natural language processing framework designed to extract **causal relationships** from German text. Built upon the `Transformer` architecture, this collection of scripts uses fine-tuned encoder-only models to perform two key tasks:
+CausalBERT is a natural language processing framework designed to extract **causal relationships** from German text. Built upon the `Transformer` architecture, this collection of scripts uses a multi-task fine-tuned encoder-only model to perform two tasks:
 
-1.  **Token Classification (Span Recognition)**: Identifying and labeling causal indicators and entities within a sentence (e.g., "B-INDICATOR", "I-ENTITY").
-2.  **Relation Classification**: Determining the causal relationship (CAUSE, EFFECT, INTERDEPENDENCY, or NO_RELATION) between a given indicator and entity pair within a sentence.
+1.  **Token Classification (Span Recognition)**: Identifying causal indicators and entities within a sentence (e.g., "B-INDICATOR", "I-ENTITY").
+2.  **Relation Classification**: Determining the causal relationship (e.g., CAUSE, EFFECT, INTERDEPENDENCY, or NO_RELATION, with polarity/modality) between a given indicator and entity pair within a sentence.
 
-This repository holds the code to create **datasets**, **train** and run **inference**. A prototype [model](https://huggingface.co/norygano/CBERT) based on German Environmental Texts aims to demonstrate the framework's capabilities.
-
-![KBA](resources/KBA.png)
+This repository holds the code to create **datasets**, **train**, and run **inference**.
 
 ## Features
 
 * **Multi-Task Learning**: Jointly trains on token classification and relation classification tasks for improved performance.
-* **German Language Support**: Leverages the `EuroBERT/EuroBERT-2.1B` base model, making it suitable for German text.
-* **Custom Token Handling**: Incorporates a special `<|parallel_sep|>` token for effective handling of multi-part inputs in relation classification.
-* **Flexible Data Preparation**: Includes a robust script for preparing datasets from raw JSON, handling tokenization, and BIO (Beginning, Inside, Outside) labeling.
+* **German Language Support**: Compatible with [EuroBERT/EuroBERT-610m](https://huggingface.co/EuroBERT/EuroBERT-610m) and other multiliangual BERTs.
+* **Custom Token Handling**: Injects a special `<|parallel_sep|>` token for effective handling of multi-part inputs in relation classification.
+* **Robust Data Pipeline**: Includes scripts for preparing datasets from raw JSON, handling tokenization, and BIO labeling.
 * **Weighted Loss**: Dynamically calculates and applies class weights during training to address potential class imbalance in both token and relation datasets.
-* **Inference Capabilities**: Provides functions for predicting token labels, relation labels, batch predictions, and comprehensive sentence analysis.
-* **Embedding Analysis**: Offers a utility to analyze token embedding trajectories across layers, useful for model interpretability.
+* **Command-Line Inference**: Provides a simple command-line interface for running automatic causal extraction on new sentences.
+
+## Example
+> *Die Bundesregierung will das Waldsterben stoppen.*
+
+| Token | BIO Label | Confidence |
+| :--- | :--- | :--- |
+| Die | O | 0.9727 |
+| **Bundesregierung** | **B-ENTITY** | **0.6602** |
+| will | O | 0.9492 |
+| das | O | 0.9453 |
+| **Waldsterben** | **B-ENTITY** | **0.6719** |
+| **stoppen** | **B-INDICATOR** | **0.4980** |
+| . | O | 0.9727 |
+
+| Indicator | Entity | Relation Label | Confidence |
+| :--- | :--- | :--- | :--- |
+| **stoppen** | **Bundesregierung** | **MONO\_POS\_CAUSE** | **0.9922** |
+| **stoppen** | **Waldsterben** | **MONO\_NEG\_EFFECT** | **0.9961** |
 
 ## Installation
 
@@ -27,18 +42,10 @@ To set up the environment, clone the repository and install the package using pi
 git clone [https://github.com/norygami/CausalBERT.git](https://github.com/norygami/CausalBERT.git)
 cd CausalBERT
 pip install .
-```
+````
 
-This will install all necessary dependencies specified in `setup.py`.
-
-For SpaCy, if you plan to use dependency parsing during dataset creation, download the German model:
-
-```bash
-python -m spacy download de_core_news_trf
-```
 
 ## Project Structure
-
 ```
 causalbert/
 ├── train.py                # Script for training the CausalBERT model
@@ -57,158 +64,65 @@ causalbert/
 │       │   └── relation/
 │       │       ├── train/
 │       │       └── test/
-│       └── dep/            # Processed datasets (with dependency parsing - optional)
-│           ├── token/
-│           │   ├── train/
-│           │   └── test/
-│           └── relation/
-│               ├── train/
-│               └── test/
-│   └── model/              # Directory for saving trained models
-│       └── CausalBERT_EuroBERT/ # Example saved model directory
+│   └── model/              # Directory to save trained models
+│       └── C-EBERT-610m/ # Example saved model directory
 │           ├── config.json
 │           ├── model.safetensors
 │           └── tokenizer.json
-README.md               # This file
-LICENSE                 # Apache License 2.0 text
-.gitignore              # Git ignore file
-pyproject.toml          # Project configuration for build system
+README.md
+LICENSE
+.gitignore
+pyproject.toml
 setup.py                # Setup script for package installation
-MANIFEST.in             # Manifest file for packaging
+MANIFEST.in
 ```
 
 ## Usage
-
 ### 1\. Data Preparation
 
-Your raw data should be in a JSON file (e.g., `all_sentences.json`).
-
-Run `dataset.py` to process your raw data into token and relation classification datasets. You will need to provide the full path to your input JSON file.
+Your raw data should be in a JSON file. Run `dataset.py` to process your raw data:
 
 ```bash
-# Example if all_sentences.json is in a 'data/raw_input' folder:
-python -m causalbert.dataset --input_json_path data/raw_input/all_sentences.json --base_dir ./data --model_name "EuroBERT/EuroBERT-2.1B" --debug # Add --dep for dependency parsing
-```
-
-**Key Arguments for `dataset.py`:**
-
-  * `--input_json_path`: **(REQUIRED)** The full path to your raw input JSON file (e.g., `data/output/inception/json/all_sentences.json`).
-  * `--base_dir`: Base directory for where the processed datasets will be saved (default: `./data`).
-  * `--model_name`: The pre-trained model name used for tokenization (e.g., `"EuroBERT/EuroBERT-2.1B"`). **Ensure this matches the `model_name` used in `train.py` and `infer.py`.**
-  * `--include_empty`: If set, includes sentences with no relations in the token dataset (default: `False`).
-  * `--debug`: Enables debug logging for more detailed output during data processing.
-  * `--dep`: If set, performs dependency parsing using SpaCy and includes `upos`, `feats`, and `dep` fields in the token dataset.
-
-The processed datasets will be saved to `data/dataset/base/` or `data/dataset/dep/` (if `--dep` is used) within your `--base_dir`.
+# Example for processing raw data:
+python -m causalbert.dataset --input_json_path data/raw_input/all_sentences.json --base_dir ./data --model_name "EuroBERT/EuroBERT-610m"
+````
 
 ### 2\. Training the Model
-
-The `train.py` script orchestrates the training process. It loads the prepared datasets, initializes the CausalBERT model, and fine-tunes it for the specified number of epochs.
+The `train.py` script orchestrates the training process using the Hugging Face `Trainer`.
 
 ```bash
-python -m causalbert.train --epochs 5 --batch_size 8 --lr 2e-5 --use_wandb True
-```
+# Example training command:
+python -m causalbert.train --epochs 8 --model_name "EuroBERT/EuroBERT-610m"
+````
 
-**Key Arguments for `train.py`:**
+*Note: Full arguments are detailed in [train.py](https://github.com/padjohn/cbert/blob/main/causalbert/train.py), which supports complex arguments via a training notebook/script.*
 
-  * `--base_dir`: Base directory where datasets are located and models will be saved (default: `../data`).
-  * `--model_name`: The base Transformer model to use (default: `"EuroBERT/EuroBERT-2.1B"`).
-  * `--model_save_name`: Name for the saved model directory (default: `"CausalBERT_EuroBERT"`).
-  * `--epochs`: Number of training epochs (default: `5`).
-  * `--batch_size`: Training batch size (default: `8`).
-  * `--lr`: Learning rate for the AdamW optimizer (default: `2e-5`).
-  * `--device`: Device to use for training (`cuda` or `cpu`). Automatically detected if not specified.
-  * `--use_wandb`: Enable Weights & Biases logging (default: `True`).
-  * `--gradient_accumulation_steps`: Number of steps for gradient accumulation (default: `4`).
+### 3\. Inference and Analysis (Command Line)
+With `run_inference.py`. You can provide a local path to your model or a Hugging Face Hub ID.
 
-The trained model and tokenizer will be saved to `data/model/{model_save_name}`.
+```bash
+# Run analysis on two sentences using a local model directory:
+python run_inference.py \
+    --model_path "pdjohn/C-EBERT-610m" \
+    --sentences "Autoverkehr verursacht Bienensterben." "Lärm ist der Grund für Stress."
+````
 
-### 3\. Inference and Analysis
+#### Low-Level API Usage
 
-The `infer.py` script provides various functions to load your trained model and perform predictions, including confidence scores and entity merging.
+The core functionality remains available via the `causalbert.infer` module for custom scripts.
 
-#### Loading the Model
+##### Comprehensive Sentence Analysis (Automatic Extraction)
 
-```python
-from causalbert.infer import load_model
-
-model_path = "pdjohn/C-EBERT-210m"
-model, tokenizer, config, device = load_model(model_dir)
-
-print(f"Model loaded on {device}")
-```
-
-#### Predicting Token Labels
-
-Given a sentence, predict the BIO labels for each token.
+Automatically extract indicators, entities, and classify all possible relations in a sentence.
 
 ```python
-from causalbert.infer import analyze_sentence
+from causalbert.infer import load_model, sentence_analysis
 
-sentence = "Der Krieg in der Ukraine verursachte hohe Verluste."
-result = analyze_sentence(model, tokenizer, config, sentence, [], device)
-for token, label, conf in result["tokens"]:
-    print(f"Token: {token}, Label: {label}, Confidence: {conf:.4f}")
-# Output: [('Der', 'O', 0.98), ...]
-```
-
-#### Merging BIO Entities
-
-Merge tokens and BIO labels into readable entity spans with average confidence.
-
-```python
-from causalbert.infer import merge_bio_entities
-
-tokens = [t for t, l, c in result["tokens"]]
-labels = [l for t, l, c in result["tokens"]]
-confs = [c for t, l, c in result["tokens"]]
-merged = merge_bio_entities(tokens, labels, confs)
-for entity_text, entity_label, avg_confidence in merged:
-    print(f"Span: '{entity_text}', Type: '{entity_label}', Avg Confidence: {avg_confidence:.4f}")
-```
-
-#### Predicting Relation Labels with Confidence
-
-Given a sentence, an indicator, and an entity, predict the causal relation and confidence.
-
-```python
-from causalbert.infer import analyze_sentence
-
-sentence = "Der Krieg in der Ukraine verursachte hohe Verluste."
-indicator_entity_pairs = [("verursachte", "hohe Verluste")]
-result = analyze_sentence(model, tokenizer, config, sentence, indicator_entity_pairs, device)
-for (indicator, entity), rel_info in result["relations"]:
-    print(f"Indicator: '{indicator}', Entity: '{entity}', Relation: '{rel_info['label']}', Confidence: {rel_info['confidence']:.4f}")
-```
-
-#### Batch Prediction of Relations
-
-Predict relations for multiple (indicator, entity, sentence) tuples efficiently.
-
-```python
-from causalbert.infer import analyze_sentence
-test_cases = [
-    ("verursachte", "hohe Verluste", "Der Krieg in der Ukraine verursachte hohe Verluste."),
-    ("Folge", "Krieg", "Als Folge des Krieges stiegen die Preise."),
-]
-for indicator, entity, sentence in test_cases:
-    result = analyze_sentence(model, tokenizer, config, sentence, [(indicator, entity)], device)
-    print(result["relations"])
-```
-
-#### Comprehensive Sentence Analysis (Automatic Extraction)
-
-Automatically extract indicators and entities, merge BIO spans, and classify relations.
-
-```python
-from causalbert.infer import sentence_analysis
+# Load model from Hub or local directory
+model, tokenizer, config, device = load_model("pdjohn/C-EBERT-610m")
 
 sentence = "Der Krieg in der Ukraine verursachte hohe Verluste und führte zu einem Anstieg der Preise."
-analysis = sentence_analysis(model, tokenizer, config, sentence, device)
-
-print("Merged Spans:")
-for span, label, conf in analysis["merged_spans"]:
-    print(f"Span: '{span}', Label: '{label}', Avg Confidence: {conf:.4f}")
+analysis = sentence_analysis(model, tokenizer, config, [sentence], device)[0]
 
 print("Derived Relations:")
 for (indicator, entity), rel_info in analysis["derived_relations"]:
@@ -216,59 +130,41 @@ for (indicator, entity), rel_info in analysis["derived_relations"]:
 ```
 
 ## Model Architecture (`model.py`)
-
 The `CausalBERTMultiTaskModel` is a custom `PreTrainedModel` built on top of a `Hugging Face AutoModel` (e.g., EuroBERT).
 
-  * **`CausalBERTMultiTaskConfig`**: A custom configuration class inheriting from `PretrainedConfig`, used to store specific parameters for the multi-task model, such as the number of span and relation labels, base model name, and class weights for loss calculation.
-  * **Base Model**: The model initializes a `transformers.AutoModel` (e.g., EuroBERT) as its backbone. It supports `torch.bfloat16` and `torch.float16` for efficient computation on compatible hardware.
-  * **Task-Specific Heads**:
-      * `token_classifier`: A linear layer for token classification (span recognition).
-      * `relation_classifier`: A linear layer for relation classification.
-  * **Weighted CrossEntropyLoss**: The model dynamically applies class weights for the `CrossEntropyLoss` function in both token and relation classification tasks. These weights are calculated in `train.py` to mitigate class imbalance.
-  * **Forward Pass**: The `forward` method directs the input through the base model and then through the appropriate classification head based on the `task` argument ("token" or "relation").
+  - **`CausalBERTMultiTaskConfig`**: A custom configuration class inheriting from `PretrainedConfig`, used to store specific parameters for the multi-task model, such as the number of span and relation labels, base model name, and class weights for loss calculation.
+  - **Base Model**: The model initializes a `transformers.AutoModel` (e.g., EuroBERT) as its base.
+  - **Task-Specific Heads**: `token_classifier` and `relation_classifier` linear layers.
+  - **Weighted CrossEntropyLoss**: The model dynamically applies class weights for the `CrossEntropyLoss` function in both token and relation classification tasks.
+  - **Forward Pass**: The `forward` method directs the input through the base model and then through the appropriate classification head based on the `task` argument ("token" or "relation").
 
 ## Dataset Creation (`dataset.py`)
-
 The `dataset.py` script is responsible for transforming raw sentence data into a format suitable for training.
 
-  * **Sentence Cleaning**: Standardizes spaces and punctuation.
-  * **Tokenization**: Uses the specified `AutoTokenizer` (e.g., `EuroBERT/EuroBERT-2.1B`) and adds a special `"<|parallel_sep|>"` token if not present.
-  * **BIO Labeling**: It robustly assigns BIO (Beginning, Inside, Outside) tags to tokens for span recognition, based on character offsets from the raw text annotations.
-  * **Relation Data Formatting**: Prepares data for relation classification by combining indicator, entity, and sentence into a single input sequence, separated by the `<|parallel_sep|>` token.
-  * **Class Mapping**: Defines mappings for span labels (`O`, `B-INDICATOR`, `I-INDICATOR`, `B-ENTITY`, `I-ENTITY`) and relation labels (`NO_RELATION`, `CAUSE`, `EFFECT`, `INTERDEPENDENCY`).
-  * **Train/Test Split**: Splits the prepared datasets into training and testing sets and saves them to disk using Hugging Face `datasets` library.
-  * **Dependency Parsing (Optional)**: Can integrate SpaCy to extract Universal Part-of-Speech (UPOS), morphological features (FEATS), and dependency relations (DEP) for each token, if the `--dep` flag is used.
+  - **BIO Labeling**: Robustly assigns BIO tags to tokens for span recognition.
+  - **Relation Data Formatting**: Prepares data for relation classification by combining indicator, entity, and sentence into a single input sequence, separated by the `<|parallel_sep|>` token.
+  - **Dependency Parsing (Optional)**: Can integrate SpaCy to extract Universal Part-of-Speech (UPOS), morphological features (FEATS), and dependency relations (DEP) for each token, if the `--dep` flag is used.
 
 ## Training Process (`train.py`)
 
 The `train.py` script handles the end-to-end training workflow:
 
-  * **Device Setup**: Automatically detects and uses CUDA if available, otherwise falls back to CPU. Supports `bfloat16` and `float16` precision on CUDA-enabled GPUs.
-  * **Data Loading**: Loads pre-processed datasets for token and relation tasks from disk.
-  * **Class Weight Calculation**: Crucially, it calculates and applies normalized inverse-frequency class weights for both token and relation classification tasks. This helps in training with imbalanced datasets.
-  * **Model and Optimizer Initialization**: Initializes `CausalBERTMultiTaskModel` with the calculated weights and `AdamW` optimizer.
-  * **Multi-Task Data Loaders**: Creates `DataLoader` instances for both token and relation tasks, using a `MultiTaskCollator` to handle batching and padding.
-  * **Training Loop**: Iterates through epochs, alternating between token and relation task loaders to perform multi-task training.
-  * **Gradient Accumulation**: Implements gradient accumulation to simulate larger batch sizes, which can be beneficial for training large models or with limited GPU memory.
-  * **Mixed Precision Training**: Utilizes `torch.autocast` and `torch.cuda.amp.GradScaler` for mixed-precision training (FP16/BF16) when on CUDA, enhancing training speed and reducing memory usage.
-  * **Weights & Biases Integration**: Logs training metrics (loss per task, epoch, global step) to Weights & Biases for monitoring.
-  * **Model Saving**: Saves the trained model and tokenizer at the end of training.
+  - **Trainer API**: Uses the Hugging Face `Trainer` to manage the training loop, including checkpoints and evaluation.
+  - **Multi-Task Data Loaders**: Uses a custom `MultiTaskTrainer` and `GroupByTaskBatchSampler` to create batches that alternate between token and relation tasks.
+  - **PEFT/LoRA Integration**: Supports Parameter-Efficient Fine-Tuning (PEFT/LoRA) for efficient training of large base models.
+  - **Class Weight Calculation**: Crucially, it calculates and applies normalized inverse-frequency class weights for both token and relation classification tasks to mitigate class imbalance.
+  - **Evaluation**: Performs evaluation on a single task (token classification) per epoch to ensure consistency for early stopping, while reporting final metrics for both tasks after training.
 
-## Future Work
-
-  * Add comprehensive evaluation metrics (F1-score, precision, recall) for both tasks.
-  * Implement a dedicated evaluation script.
-  * Explore different base models and architectures.
-  * Extend to other causal relation types or languages.
-  * Integrate Hugging Face `Trainer` API for potentially simpler training loops and evaluation.
+## ToDo
+  - Comprehensive evaluation metrics (F1-score, precision, recall) for both tasks across the entire test set.
+  - ``example_input.json``
+  - Infer to ``output.json``
 
 ## Contributing
-
 Contributions are welcome\! Please feel free to open issues or submit pull requests.
 
 ## License
-
-This project is licensed under the Apache License 2.0. See the [LICENSE](./LICENSE) file for more details.
+This project is licensed under the Apache License 2.0. See the [LICENSE](https://www.google.com/search?q=./LICENSE) file for more details.
 
 **Important Note on Base Models:**
-This project utilizes and fine-tunes pre-trained Transformer models from the Hugging Face Hub, specifically `EuroBERT/EuroBERT-210m`, which is also licensed under Apache License 2.0. While our code is permissively licensed, **the resulting fine-tuned model (weights and configurations) will inherit the license of the base model it was trained on.** Users are advised to check the specific license of any base model they choose to use with this code to ensure compliance with their intended use cases.
+This project utilizes and fine-tunes pre-trained Transformer models from the Hugging Face Hub, specifically `EuroBERT/EuroBERT-610m`, which is also licensed under Apache License 2.0. While our code is permissively licensed, **the resulting fine-tuned model (weights and configurations) will inherit the license of the base model it was trained on.** Users are advised to check the specific license of any base model they choose to use with this code to ensure compliance with their intended use cases.

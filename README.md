@@ -1,6 +1,6 @@
 # CausalBERT: Extracting Causal Attribution
 
-CausalBERT is a natural language processing framework designed to extract **causal relationships** from German text. Built upon the `Transformer` architecture, this collection of scripts uses a multi-task fine-tuned encoder-only model to perform two tasks:
+CausalBERT is a **natural language processing** framework to extract **causal attributions** from German text. Built upon the `Transformer` architecture, this collection of scripts uses a multi-task fine-tuned encoder-only model to perform two tasks:
 
 1.  **Token Classification (Span Recognition)**: Identifying causal indicators and entities within a sentence (e.g., "B-INDICATOR", "I-ENTITY").
 2.  **Relation Classification**: Determining the causal relationship (e.g., CAUSE, EFFECT, INTERDEPENDENCY, or NO_RELATION, with polarity/modality) between a given indicator and entity pair within a sentence.

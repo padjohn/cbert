@@ -2,10 +2,6 @@
 *.py[cod]
 **/__pycache__/
 
-# Coverage
-htmlcov/
-.coverage
-
 # Logs
 **/log/
 
@@ -21,5 +17,6 @@ dist/
 
 # OS files
 .DS_Store
+
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/

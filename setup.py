@@ -3,7 +3,7 @@ from setuptools import setup, find_packages
 setup(
     name="causalbert",
     version="0.1.0",
-    description="CausalBERT tools: dataset prep, training & inference",
+    description="CausalBERT tools: dataset, training & inference",
     author="Patrick Johnson",
     url="https://github.com/padjohn/causalbert",
     packages=find_packages(exclude=["__pycache__", "log*", "tests*"]),

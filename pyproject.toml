@@ -2,16 +2,13 @@
 requires = ["setuptools>=64.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
-# =================================================================
-# [project] Table
-# =================================================================
 [project]
 name = "causalbert"
 version = "0.1.2"
 description = "CausalBERT tools: dataset, training & inference"
 readme = "README.md"
 requires-python = ">=3.7"
-license = { text = "Apache-2.0" } # Assumes Apache-2.0 based on your file
+license = { text = "Apache-2.0" }
 keywords = ["causal-extraction", "nlp", "transformers", "german", "multitask"]
 
 authors = [
@@ -27,7 +24,6 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
-# install_requires from setup.py
 dependencies = [
     "torch>=1.9.0",
     "numpy>=1.21.0",
@@ -42,10 +38,8 @@ dependencies = [
 # [tool.setuptools] Table
 # =================================================================
 [tool.setuptools]
-# Replaces include_package_data=True
 include-package-data = true 
 
-# Replaces find_packages(exclude=[...])
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["causalbert*"]

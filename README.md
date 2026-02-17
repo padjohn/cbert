@@ -2,8 +2,8 @@
 
 A multi-task transformer framework for extracting **fine-grained causal attributions** from German text. C-BERT jointly performs span recognition and relation classification, decomposing causal influence into role, polarity, and salience.
 
-📄 **Paper:** [C-BERT: Factorized Causal Relation Extraction](https://tuprints.ulb.tu-darmstadt.de/handle/tuda/15159)
-🤗 **Models:** [C-BERT v3 (recommended)](https://huggingface.co/pdjohn/C-EBERT-610m-v3) · [C-BERT v2](https://huggingface.co/pdjohn/C-EBERT-610m-v2)
+📄 **Paper:** [C-BERT: Factorized Causal Relation Extraction](https://tuprints.ulb.tu-darmstadt.de/handle/tuda/15159)  
+🤗 **Models:** [C-BERT v3 (recommended)](https://huggingface.co/pdjohn/C-EBERT-610m-v3) · [C-BERT v2](https://huggingface.co/pdjohn/C-EBERT-610m-v2)  
 📊 **Dataset:** [Bundestag Causal Attribution](https://huggingface.co/datasets/pdjohn/bundestag-causal-attribution)
 
 ## What C-BERT Does

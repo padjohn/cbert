@@ -8,7 +8,7 @@ A multi-task transformer framework for extracting **fine-grained causal attribut
 
 ## What C-BERT Does
 
-C-BERT extracts causal relations as **(Cause, Effect, Influence)** triples, where Influence ∈ [−1, +1] encodes both **polarity** (promoting vs. inhibiting) and **salience** (monocausal vs. polycausal attribution strength).
+C-BERT extracts causal relations as **(Cause, Effect, Influence)** triples, where Influence $∈ [−1, +1]$ encodes both **polarity** (promoting vs. inhibiting) and **salience** (monocausal vs. polycausal attribution strength).
 
 **Task 1 — Span Recognition** identifies causal indicators and entities via BIOES tagging:
 
@@ -28,7 +28,7 @@ C-BERT extracts causal relations as **(Cause, Effect, Influence)** triples, wher
 | verursachen | Pesticide bans | CAUSE | POS | MONO | MONO_POS_CAUSE |
 | verursachen | insect decline | EFFECT | NEG | MONO | MONO_NEG_EFFECT |
 
-→ **Tuple:** (Pesticide bans, insect decline, I = −1.0) — pesticide bans cause the disappearance of insect decline.
+→ **Tuple:** (Pesticide bans, insect decline, $I = −1.0$) — pesticide bans cause the disappearance of insect decline.
 
 ## Two Architectures
 
@@ -75,16 +75,16 @@ for analysis in results:
 **Output:**
 ```
 Pestizide verursachen Insektensterben.
-  verursachen → Pestizide: MONO_POS_CAUSE ($I = +1.00$)
-  verursachen → Insektensterben: MONO_POS_EFFECT ($I = +1.00$)
+  verursachen → Pestizide: MONO_POS_CAUSE (I = +1.00)
+  verursachen → Insektensterben: MONO_POS_EFFECT (I = +1.00)
 
 Pestizidverbote verursachen die Vernichtung von Insektensterben.
-  verursachen → Pestizidverbote: MONO_POS_CAUSE ($I = +1.00$)
-  verursachen → Insektensterben: MONO_NEG_EFFECT ($I = -1.00$)
+  verursachen → Pestizidverbote: MONO_POS_CAUSE (I = +1.00)
+  verursachen → Insektensterben: MONO_NEG_EFFECT (I = -1.00)
 
 Pestizide sind die Hauptursache von Insektensterben.
-  Hauptursache → Pestizide: PRIO_POS_CAUSE ($I = +0.75$)
-  Hauptursache → Insektensterben: MONO_POS_EFFECT ($I = +1.00$)
+  Hauptursache → Pestizide: PRIO_POS_CAUSE (I = +0.75)
+  Hauptursache → Insektensterben: MONO_POS_EFFECT (I = +1.00)
 ```
 
 ## Command-Line Inference
@@ -160,7 +160,7 @@ C-BERT extends [EuroBERT-610m](https://huggingface.co/EuroBERT/EuroBERT-610m) wi
 - **Polarity** (2-class, masked for NO_RELATION): POS, NEG
 - **Salience** (3-class, masked for NO_RELATION): MONO, PRIO, DIST
 
-Polarity and salience heads are masked during training and inference for NO_RELATION predictions. Influence is reconstructed as I = sign(polarity) × salience_value.
+Polarity and salience heads are masked during training and inference for NO_RELATION predictions. Influence is reconstructed as $I = \text{sign(polarity)} × \text{salience-value}$.
 
 **Relation Classification (v2):** Same input format, single 14-class softmax over the full combinatorial label space.
 

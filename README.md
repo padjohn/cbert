@@ -25,8 +25,8 @@ C-BERT extracts causal relations as **(Cause, Effect, Influence)** triples, wher
 
 | Indicator | Entity | Role | Polarity | Salience | Label |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| verursachen | Pesticide bans | CAUSE | POS | MONO | MONO_POS_CAUSE |
-| verursachen | insect decline | EFFECT | NEG | MONO | MONO_NEG_EFFECT |
+| cause | Pesticide bans | CAUSE | POS | MONO | MONO_POS_CAUSE |
+| cause | insect decline | EFFECT | NEG | MONO | MONO_NEG_EFFECT |
 
 → **Tuple:** (Pesticide bans, insect decline, $I = −1.0$) — pesticide bans cause the disappearance of insect decline.
 
@@ -59,9 +59,9 @@ from causalbert.infer import load_model, sentence_analysis
 model, tokenizer, config, device = load_model("pdjohn/C-EBERT-610m-v3")
 
 sentences = [
-    "Pestizide verursachen Insektensterben.",
-    "Pestizidverbote verursachen die Vernichtung von Insektensterben.",
-    "Pestizide sind die Hauptursache von Insektensterben.",
+    "Pesticides cause insect decline.",
+    "Pesticide bans cause the disappearance of insect decline.",
+    "Pesticide are the main cause of insect decline.",
 ]
 
 results = sentence_analysis(model, tokenizer, config, sentences, device=device, batch_size=8)
@@ -74,17 +74,17 @@ for analysis in results:
 
 **Output:**
 ```
-Pestizide verursachen Insektensterben.
-  verursachen → Pestizide: MONO_POS_CAUSE (I = +1.00)
-  verursachen → Insektensterben: MONO_POS_EFFECT (I = +1.00)
+Pesticides cause insect decline.
+  cause → Pesticides: MONO_POS_CAUSE (I = +1.00)
+  cause → insect decline: MONO_POS_EFFECT (I = +1.00)
 
-Pestizidverbote verursachen die Vernichtung von Insektensterben.
-  verursachen → Pestizidverbote: MONO_POS_CAUSE (I = +1.00)
-  verursachen → Insektensterben: MONO_NEG_EFFECT (I = -1.00)
+Pesticide bans cause die Vernichtung von insect decline.
+  cause → Pesticide bans: MONO_POS_CAUSE (I = +1.00)
+  cause → insect decline: MONO_NEG_EFFECT (I = -1.00)
 
-Pestizide sind die Hauptursache von Insektensterben.
-  Hauptursache → Pestizide: PRIO_POS_CAUSE (I = +0.75)
-  Hauptursache → Insektensterben: MONO_POS_EFFECT (I = +1.00)
+Pesticide are the main cause of insect decline.
+  main cause → Pesticides: PRIO_POS_CAUSE (I = +0.75)
+  main cause → insect decline: MONO_POS_EFFECT (I = +1.00)
 ```
 
 ## Command-Line Inference
@@ -92,7 +92,7 @@ Pestizide sind die Hauptursache von Insektensterben.
 ```bash
 python run_inference.py \
     --model_path "pdjohn/C-EBERT-610m-v3" \
-    --sentences "Autoverkehr verursacht Bienensterben." "Lärm ist der Grund für Stress."
+    --sentences "Car traffic causes bee decline" "Noise is a source of strees."
 ```
 
 ## Project Structure
@@ -170,12 +170,12 @@ The repository includes a taxonomy of **644 German causal indicators** across 42
 
 | Family | Example | Polarity | Salience |
 | :--- | :--- | :--- | :--- |
-| Cause | *verursachen* | + | MONO |
-| Contribution | *beitragen* | + | DIST |
-| Stop | *stoppen* | − | MONO |
-| Reduce | *reduzieren* | − | DIST |
+| Ursache | *verursachen* | + | MONO |
+| Beitrag | *beitragen* | + | DIST |
+| Stoppen | *stoppen* | − | MONO |
+| Reduzieren | *reduzieren* | − | DIST |
 
-See `data/indicator_taxonomy.csv` for the complete taxonomy.
+See `data/indicator_taxonomy.csv` for the full taxonomy.
 
 ## Citation
 

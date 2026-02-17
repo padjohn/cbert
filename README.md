@@ -4,8 +4,8 @@ A multi-task transformer framework for extracting **fine-grained causal attribut
 
 📄 **Paper:** [C-BERT: Factorized Causal Relation Extraction](https://tuprints.ulb.tu-darmstadt.de/handle/tuda/15159)  
 🤗 **Models:** [C-BERT v3 (recommended)](https://huggingface.co/pdjohn/C-EBERT-610m-v3) · [C-BERT v2](https://huggingface.co/pdjohn/C-EBERT-610m-v2)  
-📊 **Dataset:** [Bundestag Causal Attribution](https://huggingface.co/datasets/pdjohn/bundestag-causal-attribution)
-
+📊 **Dataset:** [Bundestag Causal Attribution](https://huggingface.co/datasets/pdjohn/bundestag-causal-attribution)  
+📚 **Docs:** [Causal Semantics](https://causalsemantics.com/extraction/c-bert.html)
 ## What C-BERT Does
 
 C-BERT extracts causal relations as **(Cause, Effect, Influence)** triples, where Influence $∈ [−1, +1]$ encodes both **polarity** (promoting vs. inhibiting) and **salience** (monocausal vs. polycausal attribution strength).

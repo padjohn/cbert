@@ -92,7 +92,7 @@ Pesticide are the main cause of insect decline.
 ```bash
 python run_inference.py \
     --model_path "pdjohn/C-EBERT-610m-v3" \
-    --sentences "Car traffic causes bee decline" "Noise is a source of strees."
+    --sentences "Car traffic causes bee decline" "Noise is a source of stress."
 ```
 
 ## Project Structure

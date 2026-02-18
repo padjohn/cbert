@@ -78,7 +78,7 @@ Pesticides cause insect decline.
   cause → Pesticides: MONO_POS_CAUSE (I = +1.00)
   cause → insect decline: MONO_POS_EFFECT (I = +1.00)
 
-Pesticide bans cause die Vernichtung von insect decline.
+Pesticide bans cause the end of insect decline.
   cause → Pesticide bans: MONO_POS_CAUSE (I = +1.00)
   cause → insect decline: MONO_NEG_EFFECT (I = -1.00)
 
@@ -170,10 +170,10 @@ The repository includes a taxonomy of **644 German causal indicators** across 42
 
 | Family | Example | Polarity | Salience |
 | :--- | :--- | :--- | :--- |
-| Ursache | *verursachen* | + | MONO |
-| Beitrag | *beitragen* | + | DIST |
-| Stoppen | *stoppen* | − | MONO |
-| Reduzieren | *reduzieren* | − | DIST |
+| Ursache 'Cause' | *verursachen* 'causes' | + | MONO |
+| Beitrag 'Contribution' | *beitragen* 'contribute' | + | DIST |
+| Stoppen 'Stop' | *stoppen* 'stop' | − | MONO |
+| Reduzieren 'Reduce' | *reduzieren* 'reduce' | − | DIST |
 
 See `data/indicator_taxonomy.csv` for the full taxonomy.
 

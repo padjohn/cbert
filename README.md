@@ -60,7 +60,7 @@ model, tokenizer, config, device = load_model("pdjohn/C-EBERT-610m-v3")
 
 sentences = [
     "Pesticides cause insect decline.",
-    "Pesticide bans cause the disappearance of insect decline.",
+    "Pesticide bans cause the end of insect decline.",
     "Pesticide are the main cause of insect decline.",
 ]
 

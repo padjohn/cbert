@@ -484,58 +484,73 @@ def sentence_analysis(
 def extract_tuples(analysis_results, min_confidence=0.5):
     """
     Convert analysis results to (C, E, I) tuples for graph construction.
-    
-    Args:
-        analysis_results: Output from sentence_analysis()
-        min_confidence: Minimum confidence threshold
-        
-    Returns:
-        List of dicts with keys: cause, effect, influence, sentence, confidence
+    Correctly resolves Entity-Indicator pairs into Entity-Entity relationships.
     """
     tuples = []
     
     for result in analysis_results:
         sentence = result["sentence"]
         
+        # Dictionary to group entities by their shared indicator
+        # Format: { indicator: {'causes': [], 'effects': [], 'influence': 0.0, 'confs': []} }
+        indicator_groups = {}
+        
         for (indicator, entity), rel_info in result.get("derived_relations", []):
             if rel_info["confidence"] < min_confidence:
                 continue
                 
             label = rel_info["label"]
-            
-            # Skip NO_RELATION
             if label == "NO_RELATION":
                 continue
+                
+            # Initialize the indicator group if not seen yet
+            if indicator not in indicator_groups:
+                indicator_groups[indicator] = {
+                    "causes": [], 
+                    "effects": [], 
+                    "influence": None,
+                    "confs": [],
+                    "label": label
+                }
             
-            # Parse role from label
+            # Sort the entity into the correct argument bucket
             if "CAUSE" in label:
-                cause = entity
-                effect = indicator  # The indicator represents what's being caused
+                indicator_groups[indicator]["causes"].append(entity)
             elif "EFFECT" in label:
-                cause = indicator
-                effect = entity
+                indicator_groups[indicator]["effects"].append(entity)
             else:
-                continue  # INTERDEPENDENCY handled separately
+                continue
             
-            # Get influence value
+            # Resolve influence
             if rel_info.get("influence") is not None:
-                # v3 model: use direct influence value
-                influence = rel_info["influence"]
+                inf = rel_info["influence"]
             else:
-                # v2 model: derive from label
-                influence = _label_to_influence(label)
+                inf = _label_to_influence(label)
+                
+            indicator_groups[indicator]["influence"] = inf
+            indicator_groups[indicator]["confs"].append(rel_info["confidence"])
             
-            tuples.append({
-                "cause": cause,
-                "effect": effect,
-                "influence": influence,
-                "sentence": sentence,
-                "confidence": rel_info["confidence"],
-                "label": label,
-            })
+        # Build the final tuples by pairing causes and effects for each indicator
+        for indicator, data in indicator_groups.items():
+            if not data["causes"] or not data["effects"]:
+                continue
+                
+            avg_conf = sum(data["confs"]) / len(data["confs"])
+            
+            # Cartesian product: connect every cause to every effect for this indicator
+            for cause in data["causes"]:
+                for effect in data["effects"]:
+                    tuples.append({
+                        "cause": cause,
+                        "effect": effect,
+                        "indicator": indicator,
+                        "influence": data["influence"],
+                        "sentence": sentence,
+                        "confidence": avg_conf,
+                        "label": data["label"]
+                    })
     
     return tuples
-
 
 def _label_to_influence(label: str) -> float:
     """Convert v2 label to influence value."""

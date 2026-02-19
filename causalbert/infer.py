@@ -11,6 +11,7 @@ import tqdm
 import torch.nn as nn
 import torch.nn.functional as F
 import safetensors.torch
+from huggingface_hub import hf_hub_download
 from transformers import AutoConfig, AutoTokenizer
 from transformers.configuration_utils import PretrainedConfig
 from transformers.tokenization_utils import PreTrainedTokenizer
@@ -52,14 +53,26 @@ def load_model(model_dir: str, device: str | None = None) -> tuple[CausalBERTMul
 
     model = CausalBERTMultiTaskModel(config)
     
-    # Load weights
-    safetensors_path = os.path.join(model_dir, "model.safetensors")
-    pytorch_path = os.path.join(model_dir, "pytorch_model.bin")
+    if os.path.isdir(model_dir):
+            safetensors_path = os.path.join(model_dir, "model.safetensors")
+            pytorch_path = os.path.join(model_dir, "pytorch_model.bin")
+    else:
+        logging.info(f"Downloading weights from Hugging Face Hub: {model_dir}")
+        try:
+            safetensors_path = hf_hub_download(repo_id=model_dir, filename="model.safetensors")
+            pytorch_path = None
+        except Exception:
+            try:
+                pytorch_path = hf_hub_download(repo_id=model_dir, filename="pytorch_model.bin")
+                safetensors_path = None
+            except Exception:
+                raise FileNotFoundError(f"Could not find weights for {model_dir} on Hub or locally.")
 
-    if os.path.isfile(safetensors_path):
+    # Load weights using the resolved paths
+    if safetensors_path and os.path.isfile(safetensors_path):
         logging.info(f"Loading weights from: {safetensors_path}")
         state_dict = safetensors.torch.load_file(safetensors_path, device="cpu")
-    elif os.path.isfile(pytorch_path):
+    elif pytorch_path and os.path.isfile(pytorch_path):
         logging.info(f"Loading weights from: {pytorch_path}")
         state_dict = torch.load(pytorch_path, map_location="cpu")
     else:
